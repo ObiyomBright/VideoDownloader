@@ -63,7 +63,7 @@ const ClipboardModal = ({ visible, url, onPaste, onClose }) => {
                 <View
                     style={[
                         styles.overlay,
-                        { backgroundColor: theme.text + '73' } // Theme-derived ~45% backdrop
+                        { backgroundColor: theme.subtext + '73' } // Theme-derived ~45% backdrop
                     ]}
                 />
             </TouchableWithoutFeedback>
@@ -117,8 +117,8 @@ const ClipboardModal = ({ visible, url, onPaste, onClose }) => {
                         style={[styles.button, { backgroundColor: theme.primary }]}
                         onPress={handlePaste}
                     >
-                        <Ionicons name="clipboard-outline" size={18} color={theme.card} style={{ marginRight: 6 }} />
-                        <Text style={[styles.pasteText, { color: theme.card }]}>
+                        <Ionicons name="clipboard-outline" size={18} color={theme.text} style={{ marginRight: 6 }} />
+                        <Text style={[styles.pasteText, { color: theme.text }]}>
                             Paste & Process
                         </Text>
                     </TouchableOpacity>

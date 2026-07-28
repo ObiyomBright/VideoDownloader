@@ -1,25 +1,29 @@
-import * as NavigationBar from "expo-navigation-bar";
 import { useEffect } from "react";
+import { Tabs } from "expo-router";
+import { StatusBar } from "expo-status-bar";
+import { Ionicons } from "@expo/vector-icons";
+import * as NavigationBar from "expo-navigation-bar";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Platform } from "react-native";
 
-import { Tabs } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import { Ionicons } from '@expo/vector-icons';
 import colors from "../utils/Colors";
-
-import useAppTheme from '../utils/Theme';
+import useAppTheme from "../utils/Theme";
 
 const RootLayout = () => {
     const theme = useAppTheme();
+    const insets = useSafeAreaInsets();
     const isDark = theme === colors.dark;
 
     useEffect(() => {
-        NavigationBar.setBackgroundColorAsync(theme.background);
-        NavigationBar.setButtonStyleAsync(isDark ? "light" : "dark");
-    }, [theme, isDark]);
+        if (Platform.OS === 'android') {
+            NavigationBar.setButtonStyleAsync(isDark ? "light" : "dark");
+            NavigationBar.setBackgroundColorAsync(theme.background);
+        }
+    }, [theme.background, isDark]);
 
     return (
         <>
-            <StatusBar style="auto" />
+            <StatusBar style={isDark ? "light" : "dark"} />
 
             <Tabs
                 screenOptions={{
@@ -27,16 +31,17 @@ const RootLayout = () => {
                     tabBarStyle: {
                         backgroundColor: theme.background,
                         borderTopColor: theme.border,
-                        height: 68,
                         paddingTop: 8,
-                        paddingBottom: 10,
+                        paddingBottom: insets.bottom > 0 ? insets.bottom + 6 : 12,
+                        height: 60 + insets.bottom,
                     },
                     tabBarLabelStyle: {
                         fontSize: 12,
                         fontWeight: "700",
+                        paddingBottom: 4,
                     },
                     tabBarActiveTintColor: theme.primary,
-                    tabBarInactiveTintColor: theme.textSecondary,
+                    tabBarInactiveTintColor: theme.subtext,
                 }}
             >
                 <Tabs.Screen
