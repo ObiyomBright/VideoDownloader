@@ -38,16 +38,16 @@ export const fetchMediaInfo = async (url) => {
 };
 
 /**
- * Triggers video file download stream from backend
+ * Sends chosen format/quality payload to backend for download
  */
-export const triggerDownload = async (url) => {
+export const downloadMediaPayload = async (payload) => {
   try {
     const response = await fetch(`${BASE_URL}/api/download`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
@@ -63,5 +63,5 @@ export const triggerDownload = async (url) => {
 
 export default {
   fetchMediaInfo,
-  triggerDownload,
+  downloadMediaPayload,
 };

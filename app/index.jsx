@@ -103,8 +103,8 @@ const Home = () => {
                         onPress={handleDownload}
                         activeOpacity={0.8}
                     >
-                        <Ionicons name="download-outline" size={20} color={theme.card} style={{ marginRight: 8 }} />
-                        <Text style={[styles.downloadButtonText, { color: theme.card }]}>Download</Text>
+                        <Ionicons name="download-outline" size={20} color={theme.text} style={{ marginRight: 8 }} />
+                        <Text style={[styles.downloadButtonText, { color: theme.text }]}>Download</Text>
                     </TouchableOpacity>
 
                     {/* Extracted Media Details / Playlist Options */}

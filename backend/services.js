@@ -3,7 +3,18 @@ const path = require('path');
 const fs = require('fs');
 
 /**
- * Fetches metadata (title, thumbnail, duration) for a given video URL
+ * Helper to convert bytes to human readable string (MB/GB)
+ */
+const formatBytes = (bytes) => {
+  if (!bytes || bytes === 0) return null;
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+};
+
+/**
+ * Fetches metadata + format options with sizes
  */
 const getMediaInfo = (url) => {
   return new Promise((resolve, reject) => {
@@ -11,6 +22,7 @@ const getMediaInfo = (url) => {
       '--dump-json',
       '--no-playlist',
       '--skip-download',
+      '--extractor-args', 'youtube:player_client=android,web', // Switched from ios to android
       url,
     ]);
 
@@ -29,11 +41,49 @@ const getMediaInfo = (url) => {
       if (code === 0 && stdout) {
         try {
           const info = JSON.parse(stdout);
+          const rawFormats = info.formats || [];
+
+          const parsedFormats = [];
+          const targetResolutions = [1080, 720, 480, 360];
+
+          targetResolutions.forEach((res) => {
+            const fmt = rawFormats
+              .filter((f) => f.height === res && (f.filesize || f.filesize_approx))
+              .sort((a, b) => (b.filesize || b.filesize_approx) - (a.filesize || a.filesize_approx))[0];
+
+            if (fmt) {
+              const sizeInBytes = fmt.filesize || fmt.filesize_approx;
+              parsedFormats.push({
+                label: `MP4 - ${res}p`,
+                value: `mp4-${res}p`,
+                formatId: fmt.format_id,
+                size: formatBytes(sizeInBytes),
+              });
+            } else {
+              parsedFormats.push({
+                label: `MP4 - ${res}p`,
+                value: `mp4-${res}p`,
+                size: null,
+              });
+            }
+          });
+
+          const audioFmt = rawFormats
+            .filter((f) => f.vcodec === 'none' && f.acodec !== 'none' && (f.filesize || f.filesize_approx))
+            .sort((a, b) => (b.filesize || b.filesize_approx) - (a.filesize || a.filesize_approx))[0];
+
+          parsedFormats.push({
+            label: 'MP3 - Audio Only',
+            value: 'mp3-audio',
+            size: audioFmt ? formatBytes(audioFmt.filesize || audioFmt.filesize_approx) : null,
+          });
+
           resolve({
             title: info.title || 'Untitled Video',
             thumbnail: info.thumbnail || null,
             duration: info.duration || 0,
             uploader: info.uploader || 'Unknown',
+            formats: parsedFormats,
             url: url,
           });
         } catch (e) {
@@ -50,10 +100,7 @@ const getMediaInfo = (url) => {
   });
 };
 
-/**
- * Downloads a video from a given URL using system yt-dlp
- */
-const downloadVideo = (url, outputDir = path.join(__dirname, 'downloads')) => {
+const downloadVideo = (url, format = 'mp4-720p', outputDir = path.join(__dirname, 'downloads')) => {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
@@ -61,11 +108,18 @@ const downloadVideo = (url, outputDir = path.join(__dirname, 'downloads')) => {
 
     const outputPattern = path.join(outputDir, '%(title)s.%(ext)s');
 
+    let formatSpec = 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best';
+    if (format.includes('1080p')) formatSpec = 'bv*[height<=1080]+ba/b[height<=1080]';
+    if (format.includes('720p')) formatSpec = 'bv*[height<=720]+ba/b[height<=720]';
+    if (format.includes('480p')) formatSpec = 'bv*[height<=480]+ba/b[height<=480]';
+    if (format === 'mp3-audio') formatSpec = 'ba/bestaudio';
+
     const ytdlp = spawn('yt-dlp', [
-      '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best',
+      '-f', formatSpec,
       '--merge-output-format', 'mp4',
       '-o', outputPattern,
       '--no-playlist',
+      '--extractor-args', 'youtube:player_client=android,web', // Switched from ios to android
       url,
     ]);
 
@@ -88,7 +142,6 @@ const downloadVideo = (url, outputDir = path.join(__dirname, 'downloads')) => {
       if (code === 0 && filePath && fs.existsSync(filePath)) {
         resolve(filePath);
       } else if (code === 0) {
-        // Fallback: pick the latest file in downloads if regex parsing missed stdout
         const files = fs.readdirSync(outputDir)
           .map((file) => ({
             name: file,

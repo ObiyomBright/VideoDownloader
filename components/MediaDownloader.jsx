@@ -1,496 +1,290 @@
 import React, { useState } from 'react';
 import {
-    View,
-    Text,
-    TouchableOpacity,
-    Modal,
-    FlatList,
-    StyleSheet,
-    ActivityIndicator,
+  StyleSheet,
+  View,
+  Text,
+  Image,
+  TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import useAppTheme from '../utils/Theme';
 import { downloadMediaPayload } from '../services/mediaService';
 
-/* ---------------- Quality Dropdown Component ---------------- */
-const QualityDropdown = ({ options, selectedValue, onSelect }) => {
-    const theme = useAppTheme();
-    const [isOpen, setIsOpen] = useState(false);
-
-    const currentOption = options?.find((opt) => opt.value === selectedValue) || options?.[0];
-
-    return (
-        <View>
-            <TouchableOpacity
-                style={[
-                    styles.dropdownBtn,
-                    {
-                        backgroundColor: theme.card,
-                        borderColor: theme.border,
-                    },
-                ]}
-                onPress={() => setIsOpen(true)}
-                activeOpacity={0.7}
-            >
-                <Text style={[styles.dropdownBtnText, { color: theme.text }]}>
-                    {currentOption?.label || 'Select Quality'}
-                </Text>
-                <Ionicons name="chevron-down" size={16} color={theme.subtext} />
-            </TouchableOpacity>
-
-            <Modal visible={isOpen} transparent animationType="fade" onRequestClose={() => setIsOpen(false)}>
-                <TouchableOpacity
-                    style={[styles.modalOverlay, { backgroundColor: theme.text + '73' }]}
-                    activeOpacity={1}
-                    onPress={() => setIsOpen(false)}
-                >
-                    <View style={[styles.dropdownList, { backgroundColor: theme.card, borderColor: theme.border }]}>
-                        <FlatList
-                            data={options}
-                            keyExtractor={(item) => item.value}
-                            renderItem={({ item }) => {
-                                const isSelected = item.value === selectedValue;
-                                return (
-                                    <TouchableOpacity
-                                        style={[
-                                            styles.optionItem,
-                                            {
-                                                backgroundColor: isSelected ? theme.primary + '15' : theme.card,
-                                                borderBottomColor: theme.border,
-                                            },
-                                        ]}
-                                        onPress={() => {
-                                            onSelect(item.value);
-                                            setIsOpen(false);
-                                        }}
-                                    >
-                                        <Text
-                                            style={[
-                                                styles.optionText,
-                                                {
-                                                    color: isSelected ? theme.primary : theme.text,
-                                                    fontWeight: isSelected ? '700' : '400',
-                                                },
-                                            ]}
-                                        >
-                                            {item.label} ({item.size})
-                                        </Text>
-                                        {isSelected && <Ionicons name="checkmark" size={18} color={theme.primary} />}
-                                    </TouchableOpacity>
-                                );
-                            }}
-                        />
-                    </View>
-                </TouchableOpacity>
-            </Modal>
-        </View>
-    );
-};
-
-/* ---------------- Single Media View ---------------- */
-const SingleMediaView = ({ mediaData }) => {
-    const theme = useAppTheme();
-    const [selectedQuality, setSelectedQuality] = useState(mediaData.qualities?.[0]?.value || '');
-    const [selectedFormat, setSelectedFormat] = useState('mp4');
-
-    const activeQualityObj = mediaData.qualities?.find((q) => q.value === selectedQuality);
-
-    const handleDownload = () => {
-        downloadMediaPayload({
-            type: 'single',
-            title: mediaData.title,
-            format: selectedFormat,
-            quality: selectedQuality,
-        });
-    };
-
-    return (
-        <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
-            <View style={styles.headerRow}>
-                <Ionicons name="film-outline" size={28} color={theme.primary} />
-                <View style={styles.titleContainer}>
-                    <Text numberOfLines={1} style={[styles.title, { color: theme.text }]}>
-                        {mediaData.title}
-                    </Text>
-                    <Text style={[styles.subtext, { color: theme.subtext }]}>
-                        Source: {mediaData.platform} • {activeQualityObj?.size || mediaData.fileSize}
-                    </Text>
-                </View>
-            </View>
-
-            {/* Format Switcher */}
-            <View style={styles.formatRow}>
-                <Text style={[styles.label, { color: theme.text }]}>Format:</Text>
-                <View style={styles.formatToggleGroup}>
-                    {['mp4', 'mp3'].map((fmt) => (
-                        <TouchableOpacity
-                            key={fmt}
-                            style={[
-                                styles.formatBadge,
-                                {
-                                    backgroundColor: selectedFormat === fmt ? theme.primary : theme.background,
-                                    borderColor: theme.border,
-                                },
-                            ]}
-                            onPress={() => setSelectedFormat(fmt)}
-                        >
-                            <Text
-                                style={[
-                                    styles.formatBadgeText,
-                                    { color: selectedFormat === fmt ? theme.card : theme.text },
-                                ]}
-                            >
-                                {fmt.toUpperCase()}
-                            </Text>
-                        </TouchableOpacity>
-                    ))}
-                </View>
-            </View>
-
-            {/* Quality Dropdown */}
-            {selectedFormat === 'mp4' && (
-                <View style={styles.qualityRow}>
-                    <Text style={[styles.label, { color: theme.text }]}>Quality:</Text>
-                    <QualityDropdown
-                        options={mediaData.qualities}
-                        selectedValue={selectedQuality}
-                        onSelect={setSelectedQuality}
-                    />
-                </View>
-            )}
-
-            <TouchableOpacity
-                style={[styles.downloadBtn, { backgroundColor: theme.primary }]}
-                onPress={handleDownload}
-            >
-                <Ionicons name="download" size={18} color={theme.card} style={{ marginRight: 6 }} />
-                <Text style={[styles.downloadBtnText, { color: theme.card }]}>Download File</Text>
-            </TouchableOpacity>
-        </View>
-    );
-};
-
-/* ---------------- Playlist Media View ---------------- */
-const PlaylistMediaView = ({ playlistData }) => {
-    const theme = useAppTheme();
-    const [globalFormat, setGlobalFormat] = useState('mp4');
-    const [selectedIds, setSelectedIds] = useState(playlistData.items.map((item) => item.id));
-    const [itemQualities, setItemQualities] = useState(
-        playlistData.items.reduce((acc, item) => ({ ...acc, [item.id]: item.qualities[0].value }), {})
-    );
-
-    const toggleSelectAll = () => {
-        if (selectedIds.length === playlistData.items.length) {
-            setSelectedIds([]);
-        } else {
-            setSelectedIds(playlistData.items.map((item) => item.id));
-        }
-    };
-
-    const toggleItemSelect = (id) => {
-        setSelectedIds((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]));
-    };
-
-    const updateItemQuality = (id, quality) => {
-        setItemQualities((prev) => ({ ...prev, [id]: quality }));
-    };
-
-    const handleBatchDownload = () => {
-        downloadMediaPayload({
-            type: 'playlist',
-            format: globalFormat,
-            selectedIds,
-            qualities: itemQualities,
-        });
-    };
-
-    return (
-        <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
-            <View style={styles.headerRow}>
-                <Ionicons name="albums-outline" size={28} color={theme.primary} />
-                <View style={styles.titleContainer}>
-                    <Text numberOfLines={1} style={[styles.title, { color: theme.text }]}>
-                        {playlistData.title}
-                    </Text>
-                    <Text style={[styles.subtext, { color: theme.subtext }]}>
-                        {playlistData.items.length} Videos • {playlistData.platform}
-                    </Text>
-                </View>
-            </View>
-
-            {/* Global Format Selector */}
-            <View style={[styles.formatHeader, { borderBottomColor: theme.border }]}>
-                <Text style={[styles.label, { color: theme.text }]}>Format:</Text>
-                <View style={styles.checkboxContainer}>
-                    {['mp4', 'mp3'].map((fmt) => (
-                        <TouchableOpacity
-                            key={fmt}
-                            style={styles.checkboxOption}
-                            onPress={() => setGlobalFormat(fmt)}
-                        >
-                            <Ionicons
-                                name={globalFormat === fmt ? 'checkbox' : 'square-outline'}
-                                size={20}
-                                color={theme.primary}
-                            />
-                            <Text style={[styles.checkboxLabel, { color: theme.text }]}>{fmt.toUpperCase()}</Text>
-                        </TouchableOpacity>
-                    ))}
-                </View>
-            </View>
-
-            {/* Select All Action */}
-            <TouchableOpacity style={styles.selectAllBtn} onPress={toggleSelectAll}>
-                <Ionicons
-                    name={selectedIds.length === playlistData.items.length ? 'checkbox' : 'square-outline'}
-                    size={20}
-                    color={theme.primary}
-                />
-                <Text style={[styles.selectAllText, { color: theme.text }]}>
-                    Select All ({selectedIds.length}/{playlistData.items.length})
-                </Text>
-            </TouchableOpacity>
-
-            {/* Items List */}
-            {playlistData.items.map((item) => {
-                const isSelected = selectedIds.includes(item.id);
-                return (
-                    <View key={item.id} style={[styles.videoRow, { borderBottomColor: theme.border }]}>
-                        <TouchableOpacity style={styles.checkbox} onPress={() => toggleItemSelect(item.id)}>
-                            <Ionicons
-                                name={isSelected ? 'checkbox' : 'square-outline'}
-                                size={20}
-                                color={isSelected ? theme.primary : theme.subtext}
-                            />
-                        </TouchableOpacity>
-
-                        <View style={styles.videoInfo}>
-                            <Text numberOfLines={1} style={[styles.videoTitle, { color: theme.text }]}>
-                                {item.title}
-                            </Text>
-                            <Text style={[styles.videoDuration, { color: theme.subtext }]}>
-                                {item.duration}
-                            </Text>
-                        </View>
-
-                        {globalFormat === 'mp4' && (
-                            <QualityDropdown
-                                options={item.qualities}
-                                selectedValue={itemQualities[item.id]}
-                                onSelect={(q) => updateItemQuality(item.id, q)}
-                            />
-                        )}
-                    </View>
-                );
-            })}
-
-            <TouchableOpacity
-                disabled={selectedIds.length === 0}
-                style={[
-                    styles.downloadBtn,
-                    {
-                        backgroundColor: selectedIds.length > 0 ? theme.primary : theme.border,
-                    },
-                ]}
-                onPress={handleBatchDownload}
-            >
-                <Ionicons name="download" size={18} color={theme.card} style={{ marginRight: 6 }} />
-                <Text style={[styles.downloadBtnText, { color: theme.card }]}>
-                    Download Selected ({selectedIds.length})
-                </Text>
-            </TouchableOpacity>
-        </View>
-    );
-};
-
-/* ---------------- Main Container Component ---------------- */
 const MediaDownloader = ({ loading, mediaData }) => {
-    const theme = useAppTheme();
+  const theme = useAppTheme();
+  const [selectedFormat, setSelectedFormat] = useState('mp4-720p');
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
-    if (loading) {
-        return (
-            <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color={theme.primary} />
-                <Text style={[styles.loadingText, { color: theme.subtext }]}>
-                    Fetching media details & download formats...
-                </Text>
-            </View>
-        );
-    }
-
-    if (!mediaData) return null;
-
-    return mediaData.isPlaylist ? (
-        <PlaylistMediaView playlistData={mediaData} />
-    ) : (
-        <SingleMediaView mediaData={mediaData} />
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color={theme.primary} />
+        <Text style={[styles.loadingText, { color: theme.subtext }]}>
+          Extracting video info...
+        </Text>
+      </View>
     );
+  }
+
+  if (!mediaData) return null;
+
+  const formatOptions = mediaData.formats || [
+    { label: 'MP4 - 1080p', value: 'mp4-1080p', size: null },
+    { label: 'MP4 - 720p', value: 'mp4-720p', size: null },
+    { label: 'MP4 - 480p', value: 'mp4-480p', size: null },
+    { label: 'MP3 - Audio Only', value: 'mp3-audio', size: null },
+  ];
+
+  const formatDuration = (seconds) => {
+    if (!seconds) return '';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  };
+
+  const handleDownload = async () => {
+    try {
+      setDownloading(true);
+      await downloadMediaPayload({
+        type: 'single',
+        title: mediaData.title,
+        url: mediaData.url,
+        format: selectedFormat,
+      });
+    } catch (err) {
+      console.error('Download error:', err);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const selectedOption = formatOptions.find((opt) => opt.value === selectedFormat) || formatOptions[0];
+
+  return (
+    <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+      {/* Thumbnail Section */}
+      {mediaData.thumbnail && (
+        <View style={styles.thumbnailWrapper}>
+          <Image
+            source={{ uri: mediaData.thumbnail }}
+            style={styles.thumbnail}
+            resizeMode="cover"
+          />
+          {mediaData.duration > 0 && (
+            <View style={styles.durationBadge}>
+              <Text style={styles.durationText}>{formatDuration(mediaData.duration)}</Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* Details */}
+      <View style={styles.detailsContainer}>
+        <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
+          {mediaData.title}
+        </Text>
+        {mediaData.uploader && (
+          <Text style={[styles.uploader, { color: theme.subtext }]}>
+            {mediaData.uploader}
+          </Text>
+        )}
+      </View>
+
+      {/* Dropdown Menu */}
+      <View style={styles.dropdownContainer}>
+        <Text style={[styles.label, { color: theme.text }]}>Select Quality</Text>
+        <TouchableOpacity
+          style={[styles.dropdownTrigger, { borderColor: theme.border, backgroundColor: theme.background }]}
+          onPress={() => setDropdownOpen(!dropdownOpen)}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.dropdownTriggerText, { color: theme.text }]}>
+            {selectedOption.label} {selectedOption.size ? `(${selectedOption.size})` : ''}
+          </Text>
+          <Ionicons
+            name={dropdownOpen ? 'chevron-up' : 'chevron-down'}
+            size={18}
+            color={theme.text}
+          />
+        </TouchableOpacity>
+
+        {/* Dropdown Items List */}
+        {dropdownOpen && (
+          <View style={[styles.optionsMenu, { backgroundColor: theme.background, borderColor: theme.border }]}>
+            {formatOptions.map((item) => (
+              <TouchableOpacity
+                key={item.value}
+                style={[
+                  styles.optionItem,
+                  selectedFormat === item.value && { backgroundColor: theme.primary + '20' },
+                ]}
+                onPress={() => {
+                  setSelectedFormat(item.value);
+                  setDropdownOpen(false);
+                }}
+              >
+                <View style={styles.optionLabelGroup}>
+                  <Text
+                    style={[
+                      styles.optionText,
+                      { color: selectedFormat === item.value ? theme.primary : theme.text },
+                    ]}
+                  >
+                    {item.label}
+                  </Text>
+                  {item.size && (
+                    <Text style={[styles.sizeBadgeText, { color: theme.subtext }]}>
+                      {item.size}
+                    </Text>
+                  )}
+                </View>
+
+                {selectedFormat === item.value && (
+                  <Ionicons name="checkmark" size={16} color={theme.primary} />
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+      </View>
+
+      {/* Action Button */}
+      <TouchableOpacity
+        style={[styles.actionButton, { backgroundColor: theme.primary }]}
+        onPress={handleDownload}
+        disabled={downloading}
+        activeOpacity={0.8}
+      >
+        {downloading ? (
+          <ActivityIndicator size="small" color="#FFFFFF" />
+        ) : (
+          <>
+            <Ionicons name="cloud-download-outline" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.actionButtonText}>
+              Start Download
+            </Text>
+          </>
+        )}
+      </TouchableOpacity>
+    </View>
+  );
 };
 
 export default MediaDownloader;
 
 const styles = StyleSheet.create({
-    card: {
-        width: '100%',
-        padding: 16,
-        borderRadius: 14,
-        borderWidth: 1,
-        marginTop: 20,
-    },
-    headerRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    titleContainer: {
-        flex: 1,
-        marginLeft: 12,
-    },
-    title: {
-        fontSize: 15,
-        fontWeight: '700',
-    },
-    subtext: {
-        fontSize: 12,
-        marginTop: 2,
-    },
-    formatRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        marginTop: 16,
-    },
-    label: {
-        fontSize: 14,
-        fontWeight: '600',
-    },
-    formatToggleGroup: {
-        flexDirection: 'row',
-        gap: 8,
-    },
-    formatBadge: {
-        paddingHorizontal: 14,
-        paddingVertical: 6,
-        borderRadius: 8,
-        borderWidth: 1,
-    },
-    formatBadgeText: {
-        fontSize: 12,
-        fontWeight: '700',
-    },
-    qualityRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        marginTop: 12,
-    },
-    downloadBtn: {
-        height: 46,
-        borderRadius: 10,
-        flexDirection: 'row',
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginTop: 18,
-    },
-    downloadBtnText: {
-        fontSize: 15,
-        fontWeight: '700',
-    },
-    dropdownBtn: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        paddingHorizontal: 10,
-        paddingVertical: 6,
-        borderRadius: 8,
-        borderWidth: 1,
-        minWidth: 110,
-    },
-    dropdownBtnText: {
-        fontSize: 12,
-        fontWeight: '600',
-        marginRight: 6,
-    },
-    modalOverlay: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: 20,
-    },
-    dropdownList: {
-        width: '85%',
-        maxWidth: 320,
-        maxHeight: 280,
-        borderRadius: 12,
-        borderWidth: 1,
-        overflow: 'hidden',
-    },
-    optionItem: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: 14,
-        borderBottomWidth: StyleSheet.hairlineWidth,
-    },
-    optionText: {
-        fontSize: 14,
-    },
-    formatHeader: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        paddingVertical: 12,
-        borderBottomWidth: StyleSheet.hairlineWidth,
-    },
-    checkboxContainer: {
-        flexDirection: 'row',
-        gap: 16,
-    },
-    checkboxOption: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    checkboxLabel: {
-        fontSize: 13,
-        marginLeft: 6,
-        fontWeight: '600',
-    },
-    selectAllBtn: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginVertical: 12,
-    },
-    selectAllText: {
-        fontSize: 13,
-        fontWeight: '600',
-        marginLeft: 8,
-    },
-    videoRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingVertical: 10,
-        borderBottomWidth: StyleSheet.hairlineWidth,
-    },
-    checkbox: {
-        paddingRight: 10,
-    },
-    videoInfo: {
-        flex: 1,
-        marginRight: 8,
-    },
-    videoTitle: {
-        fontSize: 13,
-        fontWeight: '500',
-    },
-    videoDuration: {
-        fontSize: 11,
-        marginTop: 2,
-    },
-    loadingContainer: {
-        padding: 24,
-        alignItems: 'center',
-    },
-    loadingText: {
-        marginTop: 10,
-        fontSize: 13,
-    },
+  card: {
+    width: '100%',
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 16,
+    marginTop: 20,
+  },
+  loadingContainer: {
+    padding: 24,
+    alignItems: 'center',
+  },
+  loadingText: {
+    marginTop: 10,
+    fontSize: 14,
+  },
+  thumbnailWrapper: {
+    width: '100%',
+    height: 190,
+    borderRadius: 12,
+    overflow: 'hidden',
+    position: 'relative',
+    marginBottom: 12,
+  },
+  thumbnail: {
+    width: '100%',
+    height: '100%',
+  },
+  durationBadge: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  durationText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  detailsContainer: {
+    marginBottom: 16,
+  },
+  title: {
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 22,
+  },
+  uploader: {
+    fontSize: 13,
+    marginTop: 4,
+  },
+  dropdownContainer: {
+    marginBottom: 16,
+  },
+  label: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  dropdownTrigger: {
+    height: 48,
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dropdownTriggerText: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  optionsMenu: {
+    marginTop: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  optionItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  optionLabelGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  optionText: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  sizeBadgeText: {
+    fontSize: 12,
+  },
+  actionButton: {
+    height: 48,
+    borderRadius: 10,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  actionButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '600',
+  },
 });
