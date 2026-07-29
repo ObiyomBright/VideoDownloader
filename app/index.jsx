@@ -119,6 +119,7 @@ const Home = () => {
     };
 
     const handleDownload = () => {
+        Keyboard.dismiss();
         processUrlDownload(url);
     };
 

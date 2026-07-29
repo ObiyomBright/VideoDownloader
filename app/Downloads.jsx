@@ -1,16 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import {
-  StyleSheet,
-  View,
-  FlatList,
-  TouchableOpacity,
-} from 'react-native';
+import { StyleSheet, View, FlatList, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import ThemedView from '../components/ThemedView';
 import ThemedText from '../components/ThemedText';
 import ThemedInput from '../components/ThemedInput';
 import DownloadItemCard from '../components/DownloadItemCard';
+import ConfirmModal from '../components/ConfirmModal';
 import useAppTheme from '../utils/Theme';
 import { useDownloadStore } from '../stores/useDownloadStore';
 import { useNotification } from '../components/NotificationToast';
@@ -19,20 +15,23 @@ const DownloadsScreen = () => {
   const theme = useAppTheme();
   const { showNotification } = useNotification();
   const downloads = useDownloadStore((state) => state.downloads);
+  const removeDownload = useDownloadStore((state) => state.removeDownload);
   const clearCompleted = useDownloadStore((state) => state.clearCompleted);
+
+  // Modal State
+  const [selectedItemToDelete, setSelectedItemToDelete] = useState(null);
+  const [isDeleteModalVisible, setIsDeleteModalVisible] = useState(false);
 
   const pendingDownloads = downloads.filter(
     (d) => d.status === 'downloading' || d.status === 'pending'
   );
   const completedDownloads = downloads.filter((d) => d.status === 'completed');
 
-  // Default to 'pending' if active items exist; otherwise default to 'completed'
   const [activeTab, setActiveTab] = useState(() =>
     pendingDownloads.length > 0 ? 'pending' : 'completed'
   );
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Update tab dynamically if new pending items arrive while on the page
   useEffect(() => {
     if (pendingDownloads.length > 0 && activeTab !== 'pending') {
       setActiveTab('pending');
@@ -40,7 +39,7 @@ const DownloadsScreen = () => {
   }, [pendingDownloads.length]);
 
   const filteredDownloads = downloads.filter((item) => {
-    const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = item.title?.toLowerCase().includes(searchQuery.toLowerCase());
     if (!matchesSearch) return false;
 
     if (activeTab === 'pending') {
@@ -52,19 +51,28 @@ const DownloadsScreen = () => {
     return true;
   });
 
-  const handleClearCompleted = () => {
-    clearCompleted();
-    showNotification('Completed downloads cleared!', 'info');
+  const handleDeleteRequest = (item) => {
+    setSelectedItemToDelete(item);
+    setIsDeleteModalVisible(true);
+  };
+
+  const handleConfirmDelete = () => {
+    if (selectedItemToDelete) {
+      removeDownload(selectedItemToDelete.id);
+      showNotification('Download removed', 'info');
+    }
+    setIsDeleteModalVisible(false);
+    setSelectedItemToDelete(null);
   };
 
   return (
     <ThemedView style={styles.container} safe={true}>
       <View style={styles.contentWrapper}>
-        {/* Page Header */}
+        {/* Header */}
         <View style={styles.header}>
           <ThemedText style={styles.headerTitle}>Downloads</ThemedText>
           {completedDownloads.length > 0 && (
-            <TouchableOpacity onPress={handleClearCompleted}>
+            <TouchableOpacity onPress={clearCompleted}>
               <ThemedText style={[styles.clearText, { color: theme.primary }]}>
                 Clear Completed
               </ThemedText>
@@ -72,7 +80,7 @@ const DownloadsScreen = () => {
           )}
         </View>
 
-        {/* Responsive Search Bar */}
+        {/* Responsive Search Input */}
         <View style={styles.searchContainer}>
           <ThemedInput
             placeholder="Search downloads..."
@@ -81,22 +89,16 @@ const DownloadsScreen = () => {
             style={styles.searchInput}
           />
           {searchQuery.length > 0 && (
-            <TouchableOpacity
-              style={styles.clearSearchBtn}
-              onPress={() => setSearchQuery('')}
-            >
+            <TouchableOpacity style={styles.clearSearchBtn} onPress={() => setSearchQuery('')}>
               <Ionicons name="close-circle" size={18} color={theme.subtext} />
             </TouchableOpacity>
           )}
         </View>
 
-        {/* 2-Option Segmented Filter Tabs */}
+        {/* Filter Tabs */}
         <View style={[styles.tabsContainer, { borderColor: theme.border }]}>
           <TouchableOpacity
-            style={[
-              styles.tab,
-              activeTab === 'pending' && { backgroundColor: theme.primary },
-            ]}
+            style={[styles.tab, activeTab === 'pending' && { backgroundColor: theme.primary }]}
             onPress={() => setActiveTab('pending')}
             activeOpacity={0.8}
           >
@@ -111,10 +113,7 @@ const DownloadsScreen = () => {
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[
-              styles.tab,
-              activeTab === 'completed' && { backgroundColor: theme.primary },
-            ]}
+            style={[styles.tab, activeTab === 'completed' && { backgroundColor: theme.primary }]}
             onPress={() => setActiveTab('completed')}
             activeOpacity={0.8}
           >
@@ -133,7 +132,9 @@ const DownloadsScreen = () => {
         <FlatList
           data={filteredDownloads}
           keyExtractor={(item) => item.id}
-          renderItem={({ item }) => <DownloadItemCard item={item} />}
+          renderItem={({ item }) => (
+            <DownloadItemCard item={item} onDeleteRequest={handleDeleteRequest} />
+          )}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
           ListEmptyComponent={
@@ -146,17 +147,20 @@ const DownloadsScreen = () => {
               <ThemedText style={[styles.emptyTitle, { color: theme.subtext }]}>
                 {activeTab === 'pending' ? 'No Active Downloads' : 'No Completed Downloads'}
               </ThemedText>
-              <ThemedText style={[styles.emptySubtitle, { color: theme.subtext }]}>
-                {searchQuery
-                  ? 'No results match your search term.'
-                  : activeTab === 'pending'
-                  ? 'Any file currently downloading will appear here.'
-                  : 'Files you download will be saved here.'}
-              </ThemedText>
             </View>
           }
         />
       </View>
+
+      {/* Confirmation Modal */}
+      <ConfirmModal
+        visible={isDeleteModalVisible}
+        title="Delete Download"
+        message={`Are you sure you want to delete "${selectedItemToDelete?.title || 'this item'}"?`}
+        confirmText="Delete"
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setIsDeleteModalVisible(false)}
+      />
     </ThemedView>
   );
 };
@@ -231,10 +235,5 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginTop: 12,
-  },
-  emptySubtitle: {
-    fontSize: 13,
-    marginTop: 4,
-    textAlign: 'center',
   },
 });
