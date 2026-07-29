@@ -19,7 +19,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo.png",
-      "backgroundColor": "#0F172A"
+        "backgroundColor": "#0F172A"
       },
       "edgeToEdgeEnabled": true,
       "permissions": [
@@ -44,7 +44,8 @@
           "savePhotosPermission": "Allow VideoDownloader to save downloaded videos and media to your device.",
           "isAccessMediaLocationEnabled": true
         }
-      ]
+      ],
+      "expo-sqlite"
     ]
   }
 }

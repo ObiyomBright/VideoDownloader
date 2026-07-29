@@ -48,7 +48,7 @@ const RootLayout = () => {
                 <Tabs.Screen
                     name="index"
                     options={{
-                        title: "Paste",
+                        title: "Search",
                         tabBarIcon: ({ color, size, focused }) => (
                             <Ionicons
                                 name={focused ? "search" : "search-outline"}

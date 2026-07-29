@@ -1,6 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 import * as Sharing from 'expo-sharing';
+import { useDownloadStore } from '../stores/useDownloadStore';
 
 const API_BASE_URL = 'https://media-downloader-backend-rut5.onrender.com';
 
@@ -13,12 +14,9 @@ export const fetchMediaInfo = async (url, notify, retries = 2) => {
 
   try {
     const endpoint = `${API_BASE_URL}/api/v1/extract/url?url=${encodeURIComponent(url)}`;
-    
     const response = await fetch(endpoint, {
       method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-      },
+      headers: { 'Accept': 'application/json' },
     });
 
     if (response.status === 502 && retries > 0) {
@@ -46,35 +44,49 @@ export const fetchMediaInfo = async (url, notify, retries = 2) => {
       throw new Error(message);
     }
 
-    const data = await response.json();
-    return data;
+    return await response.json();
   } catch (error) {
     console.error('API Extract Error:', error);
     throw error;
   }
 };
 
-export const downloadToDevice = async (downloadUrl, fileName, notify) => {
+export const downloadToDevice = async (downloadUrl, fileName, title, notify) => {
+  const store = useDownloadStore.getState();
+  const taskId = store.addDownload({ title, url: downloadUrl });
+
   try {
     const { status } = await MediaLibrary.requestPermissionsAsync(true);
     const localUri = FileSystem.documentDirectory + fileName;
 
+    const callback = (downloadProgress) => {
+      const progress =
+        downloadProgress.totalBytesWritten /
+        downloadProgress.totalBytesExpectedToWrite;
+      store.updateProgress(taskId, isNaN(progress) ? 0.5 : progress, 'downloading');
+    };
+
     const downloadResumable = FileSystem.createDownloadResumable(
       downloadUrl,
-      localUri
+      localUri,
+      {},
+      callback
     );
 
+    store.updateProgress(taskId, 0, 'downloading');
     const result = await downloadResumable.downloadAsync();
 
     if (!result || !result.uri) {
-      throw new Error('Failed to download media file to local device storage.');
+      throw new Error('Failed to save media file to device.');
     }
 
     if (status === 'granted') {
       const asset = await MediaLibrary.createAssetAsync(result.uri);
       await MediaLibrary.createAlbumAsync('Downloads', asset, false);
-      if (notify) notify('Saved directly to your device Media Gallery!', 'success');
+      store.completeDownload(taskId, result.uri);
+      if (notify) notify('Saved directly to your Media Gallery!', 'success');
     } else {
+      store.completeDownload(taskId, result.uri);
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(result.uri);
       } else {
@@ -82,16 +94,9 @@ export const downloadToDevice = async (downloadUrl, fileName, notify) => {
       }
     }
   } catch (error) {
-    console.error('Download to Device Error:', error);
-    if (await Sharing.isAvailableAsync()) {
-      const localUri = FileSystem.documentDirectory + fileName;
-      const fileInfo = await FileSystem.getInfoAsync(localUri);
-      if (fileInfo?.exists) {
-        await Sharing.shareAsync(localUri);
-        return;
-      }
-    }
-    if (notify) notify(`Download failed: ${error.message || 'Unknown network error'}`, 'error');
+    console.error('Download Error:', error);
+    store.failDownload(taskId, error.message || 'Download failed');
+    if (notify) notify(`Download failed: ${error.message || 'Unknown error'}`, 'error');
   }
 };
 
@@ -99,9 +104,8 @@ export const downloadMediaPayload = async (payload, notify) => {
   const originalUrl = payload.original_url || payload.url;
   const directMediaUrl = payload.direct_url || payload.media_url || payload.url;
 
-  const cleanTitle = (payload.title || 'media')
-    .replace(/[^a-zA-Z0-9]/g, '_')
-    .substring(0, 50);
+  const title = payload.title || 'media';
+  const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
 
   const isAudio = payload.audio_only || (payload.format && payload.format.includes('mp3'));
   const extension = isAudio ? 'mp3' : 'mp4';
@@ -111,5 +115,5 @@ export const downloadMediaPayload = async (payload, notify) => {
     originalUrl
   )}&media_url=${encodeURIComponent(directMediaUrl)}`;
 
-  await downloadToDevice(downloadEndpoint, fileName, notify);
+  await downloadToDevice(downloadEndpoint, fileName, title, notify);
 };
