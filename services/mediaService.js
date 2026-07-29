@@ -1,67 +1,115 @@
-import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library';
+import * as Sharing from 'expo-sharing';
 
-const PORT = 5000;
-const BASE_URL = Platform.OS === 'android' ? `http://10.0.2.2:${PORT}` : `http://localhost:${PORT}`;
+const API_BASE_URL = 'https://media-downloader-backend-rut5.onrender.com';
 
-/**
- * Fetches video details/metadata
- */
-export const fetchMediaInfo = async (url) => {
+export const fetchMediaInfo = async (url, notify, retries = 2) => {
+  if (!url || url.includes('onrender.com')) {
+    const errorMsg = 'Please enter a valid media link from YouTube, Instagram, TikTok, etc.';
+    if (notify) notify(errorMsg, 'error');
+    throw new Error(errorMsg);
+  }
+
   try {
-    const response = await fetch(`${BASE_URL}/api/info`, {
-      method: 'POST',
+    const endpoint = `${API_BASE_URL}/api/v1/extract/url?url=${encodeURIComponent(url)}`;
+    
+    const response = await fetch(endpoint, {
+      method: 'GET',
       headers: {
-        'Content-Type': 'application/json',
+        'Accept': 'application/json',
       },
-      body: JSON.stringify({ url }),
     });
 
-    const contentType = response.headers.get('content-type');
+    if (response.status === 502 && retries > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      return await fetchMediaInfo(url, notify, retries - 1);
+    }
 
-    if (!contentType || !contentType.includes('application/json')) {
-      const rawText = await response.text();
-      console.error('Server returned non-JSON response:', rawText);
-      throw new Error(`Server error (${response.status}). Check backend terminal output.`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      let message = `Server error: ${response.status}`;
+
+      if (response.status === 502) {
+        message = 'Server is starting up or upstream extraction timed out.';
+      } else if (errorData?.detail) {
+        if (Array.isArray(errorData.detail)) {
+          message = errorData.detail.map((err) => `${err.loc?.join('.')}: ${err.msg}`).join(', ');
+        } else if (typeof errorData.detail === 'string') {
+          message = errorData.detail;
+        } else {
+          message = JSON.stringify(errorData.detail);
+        }
+      }
+
+      if (notify) notify(message, 'error');
+      throw new Error(message);
     }
 
     const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to fetch media details.');
-    }
-
     return data;
   } catch (error) {
-    console.error('Error fetching media info:', error.message);
+    console.error('API Extract Error:', error);
     throw error;
   }
 };
 
-/**
- * Sends chosen format/quality payload to backend for download
- */
-export const downloadMediaPayload = async (payload) => {
+export const downloadToDevice = async (downloadUrl, fileName, notify) => {
   try {
-    const response = await fetch(`${BASE_URL}/api/download`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
+    const { status } = await MediaLibrary.requestPermissionsAsync(true);
+    const localUri = FileSystem.documentDirectory + fileName;
 
-    if (!response.ok) {
-      throw new Error('Failed to download video file.');
+    const downloadResumable = FileSystem.createDownloadResumable(
+      downloadUrl,
+      localUri
+    );
+
+    const result = await downloadResumable.downloadAsync();
+
+    if (!result || !result.uri) {
+      throw new Error('Failed to download media file to local device storage.');
     }
 
-    return await response.blob();
+    if (status === 'granted') {
+      const asset = await MediaLibrary.createAssetAsync(result.uri);
+      await MediaLibrary.createAlbumAsync('Downloads', asset, false);
+      if (notify) notify('Saved directly to your device Media Gallery!', 'success');
+    } else {
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(result.uri);
+      } else {
+        if (notify) notify('Downloaded to app storage!', 'info');
+      }
+    }
   } catch (error) {
-    console.error('Error downloading video:', error.message);
-    throw error;
+    console.error('Download to Device Error:', error);
+    if (await Sharing.isAvailableAsync()) {
+      const localUri = FileSystem.documentDirectory + fileName;
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (fileInfo?.exists) {
+        await Sharing.shareAsync(localUri);
+        return;
+      }
+    }
+    if (notify) notify(`Download failed: ${error.message || 'Unknown network error'}`, 'error');
   }
 };
 
-export default {
-  fetchMediaInfo,
-  downloadMediaPayload,
+export const downloadMediaPayload = async (payload, notify) => {
+  const originalUrl = payload.original_url || payload.url;
+  const directMediaUrl = payload.direct_url || payload.media_url || payload.url;
+
+  const cleanTitle = (payload.title || 'media')
+    .replace(/[^a-zA-Z0-9]/g, '_')
+    .substring(0, 50);
+
+  const isAudio = payload.audio_only || (payload.format && payload.format.includes('mp3'));
+  const extension = isAudio ? 'mp3' : 'mp4';
+  const fileName = `${cleanTitle}.${extension}`;
+
+  const downloadEndpoint = `${API_BASE_URL}/api/v1/extract/download?url=${encodeURIComponent(
+    originalUrl
+  )}&media_url=${encodeURIComponent(directMediaUrl)}`;
+
+  await downloadToDevice(downloadEndpoint, fileName, notify);
 };

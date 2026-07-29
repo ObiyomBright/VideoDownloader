@@ -1,0 +1,36 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Rounded Squircle Background -->
+  <rect width="1024" height="1024" rx="224" fill="#0F172A"/>
+  
+  <!-- Subtle Glowing Inner Circle -->
+  <circle cx="512" cy="512" r="320" fill="url(#glow)" opacity="0.15"/>
+
+  <!-- Media Arrow Icon -->
+  <g filter="url(#shadow)">
+    <!-- Download Arrow Stem -->
+    <path d="M512 280 V560" stroke="url(#accentGradient)" stroke-width="64" stroke-linecap="round"/>
+    
+    <!-- Arrow Head / Play Triangle Hybrid -->
+    <path d="M352 460 L512 620 L672 460" stroke="url(#accentGradient)" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+    
+    <!-- Bottom Tray / Stream Arc -->
+    <path d="M320 720 H704" stroke="#64748B" stroke-width="56" stroke-linecap="round"/>
+  </g>
+
+  <!-- Gradients & Effects -->
+  <defs>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(512 512) rotate(90) scale(320)">
+      <stop stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    
+    <linearGradient id="accentGradient" x1="352" y1="280" x2="672" y2="620" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#818CF8"/>
+      <stop offset="1" stop-color="#4F46E5"/>
+    </linearGradient>
+
+    <filter id="shadow" x="250" y="220" width="524" height="580" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#4F46E5" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+</svg>

@@ -8,6 +8,7 @@ import { Platform } from "react-native";
 
 import colors from "../utils/Colors";
 import useAppTheme from "../utils/Theme";
+import { NotificationProvider } from "../components/NotificationToast";
 
 const RootLayout = () => {
     const theme = useAppTheme();
@@ -22,7 +23,7 @@ const RootLayout = () => {
     }, [theme.background, isDark]);
 
     return (
-        <>
+        <NotificationProvider>
             <StatusBar style={isDark ? "light" : "dark"} />
 
             <Tabs
@@ -86,7 +87,7 @@ const RootLayout = () => {
                     }}
                 />
             </Tabs>
-        </>
+        </NotificationProvider>
     );
 };
 

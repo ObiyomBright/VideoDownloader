@@ -1,5 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, TouchableOpacity, Text, View, ScrollView } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+    StyleSheet,
+    TouchableOpacity,
+    Text,
+    View,
+    ScrollView,
+    Animated,
+    Keyboard,
+    Platform,
+    Easing,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 
@@ -9,6 +19,7 @@ import ClipboardModal from '../components/ClipboardModal';
 import MediaDownloader from '../components/MediaDownloader';
 import useAppTheme from '../utils/Theme';
 import { fetchMediaInfo } from '../services/mediaService';
+import { useNotification } from '../components/NotificationToast';
 
 const Home = () => {
     const [url, setUrl] = useState('');
@@ -18,6 +29,42 @@ const Home = () => {
     const [mediaData, setMediaData] = useState(null);
 
     const theme = useAppTheme();
+    const { showNotification } = useNotification();
+
+    const translateY = useRef(new Animated.Value(0)).current;
+
+    useEffect(() => {
+        const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+        const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+        const onKeyboardShow = (event) => {
+            const shiftDistance = mediaData ? -120 : -80;
+
+            Animated.timing(translateY, {
+                toValue: shiftDistance,
+                duration: event.duration || 220,
+                easing: Easing.out(Easing.cubic),
+                useNativeDriver: true,
+            }).start();
+        };
+
+        const onKeyboardHide = (event) => {
+            Animated.timing(translateY, {
+                toValue: 0,
+                duration: event.duration || 200,
+                easing: Easing.out(Easing.cubic),
+                useNativeDriver: true,
+            }).start();
+        };
+
+        const showSubscription = Keyboard.addListener(showEvent, onKeyboardShow);
+        const hideSubscription = Keyboard.addListener(hideEvent, onKeyboardHide);
+
+        return () => {
+            showSubscription.remove();
+            hideSubscription.remove();
+        };
+    }, [mediaData, translateY]);
 
     const isValidUrl = (string) => {
         try {
@@ -39,6 +86,13 @@ const Home = () => {
         checkClipboard();
     }, []);
 
+    const handleUrlChange = (text) => {
+        setUrl(text);
+        if (mediaData) {
+            setMediaData(null);
+        }
+    };
+
     const handlePasteFromModal = () => {
         setUrl(detectedUrl);
         setModalVisible(false);
@@ -46,12 +100,17 @@ const Home = () => {
     };
 
     const processUrlDownload = async (targetUrl) => {
-        if (!targetUrl.trim()) return;
+        if (!targetUrl.trim()) {
+            showNotification('Please enter a media URL.', 'error');
+            return;
+        }
         setLoading(true);
         setMediaData(null);
+        showNotification('Fetching media information...', 'info');
         try {
-            const data = await fetchMediaInfo(targetUrl.trim());
+            const data = await fetchMediaInfo(targetUrl.trim(), showNotification);
             setMediaData(data);
+            showNotification('Media info extracted successfully!', 'success');
         } catch (error) {
             console.error('Extraction Error:', error);
         } finally {
@@ -70,8 +129,12 @@ const Home = () => {
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={false}
             >
-                <View style={styles.formContainer}>
-                    {/* Input Field */}
+                <Animated.View
+                    style={[
+                        styles.formContainer,
+                        { transform: [{ translateY }] },
+                    ]}
+                >
                     <View style={styles.inputContainer}>
                         <ThemedInput
                             placeholder="Paste a video or file URL"
@@ -79,7 +142,7 @@ const Home = () => {
                             autoCorrect={false}
                             style={styles.input}
                             value={url}
-                            onChangeText={setUrl}
+                            onChangeText={handleUrlChange}
                             returnKeyType="go"
                             onSubmitEditing={handleDownload}
                         />
@@ -97,22 +160,21 @@ const Home = () => {
                         )}
                     </View>
 
-                    {/* Download Button */}
-                    <TouchableOpacity
-                        style={[styles.downloadButton, { backgroundColor: theme.primary }]}
-                        onPress={handleDownload}
-                        activeOpacity={0.8}
-                    >
-                        <Ionicons name="download-outline" size={20} color={theme.text} style={{ marginRight: 8 }} />
-                        <Text style={[styles.downloadButtonText, { color: theme.text }]}>Download</Text>
-                    </TouchableOpacity>
+                    {!mediaData && !loading && (
+                        <TouchableOpacity
+                            style={[styles.downloadButton, { backgroundColor: theme.primary }]}
+                            onPress={handleDownload}
+                            activeOpacity={0.8}
+                        >
+                            <Ionicons name="download-outline" size={20} color={theme.text} style={{ marginRight: 8 }} />
+                            <Text style={[styles.downloadButtonText, { color: theme.text }]}>Download</Text>
+                        </TouchableOpacity>
+                    )}
 
-                    {/* Extracted Media Details / Playlist Options */}
                     <MediaDownloader loading={loading} mediaData={mediaData} />
-                </View>
+                </Animated.View>
             </ScrollView>
 
-            {/* Clipboard Detection Modal */}
             <ClipboardModal
                 visible={modalVisible}
                 url={detectedUrl}
@@ -127,16 +189,19 @@ export default Home;
 
 const styles = StyleSheet.create({
     container: {
-        flex: 1
+        flex: 1,
     },
     scrollContent: {
-        paddingVertical: 24,
+        flexGrow: 1,
+        justifyContent: 'center',
         alignItems: 'center',
+        paddingVertical: 24,
     },
     formContainer: {
         width: '90%',
         maxWidth: 600,
         alignItems: 'center',
+        justifyContent: 'center',
     },
     inputContainer: {
         width: '100%',
