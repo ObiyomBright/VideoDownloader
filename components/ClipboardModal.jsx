@@ -117,8 +117,8 @@ const ClipboardModal = ({ visible, url, onPaste, onClose }) => {
                         style={[styles.button, { backgroundColor: theme.primary }]}
                         onPress={handlePaste}
                     >
-                        <Ionicons name="clipboard-outline" size={18} color={theme.text} style={{ marginRight: 6 }} />
-                        <Text style={[styles.pasteText, { color: theme.text }]}>
+                        <Ionicons name="clipboard-outline" size={18} color='#ffffff' style={{ marginRight: 6 }} />
+                        <Text style={[styles.pasteText, { color: '#fff' }]}>
                             Paste & Process
                         </Text>
                     </TouchableOpacity>

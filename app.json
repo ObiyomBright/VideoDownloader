@@ -6,7 +6,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
       "image": "./assets/logo.png",
@@ -42,6 +42,7 @@
         {
           "photosPermission": "Allow VideoDownloader to access your photos.",
           "savePhotosPermission": "Allow VideoDownloader to save downloaded videos and media to your device.",
+          "audioPermission": "Allow VideoDownloader to save downloaded audio files to your device.",
           "isAccessMediaLocationEnabled": true
         }
       ],

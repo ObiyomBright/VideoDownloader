@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
   View,
@@ -11,11 +11,27 @@ import { Ionicons } from '@expo/vector-icons';
 import useAppTheme from '../utils/Theme';
 import { downloadMediaPayload } from '../services/mediaService';
 
-const MediaDownloader = ({ loading, mediaData }) => {
+const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
   const theme = useAppTheme();
-  const [selectedFormat, setSelectedFormat] = useState('mp4-720p');
+  const [selectedFormat, setSelectedFormat] = useState(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
+
+  const formatOptions =
+    mediaData?.available_qualities && mediaData.available_qualities.length > 0
+      ? mediaData.available_qualities
+      : [
+          { label: 'MP4 - 1080p', value: '1080', size: null },
+          { label: 'MP4 - 720p', value: '720', size: null },
+          { label: 'MP4 - 480p', value: '480', size: null },
+          { label: 'MP3 - Audio Only', value: 'mp3-audio', size: null },
+        ];
+
+  useEffect(() => {
+    if (formatOptions.length > 0) {
+      setSelectedFormat(formatOptions[0].value);
+    }
+  }, [mediaData]);
 
   if (loading) {
     return (
@@ -30,13 +46,6 @@ const MediaDownloader = ({ loading, mediaData }) => {
 
   if (!mediaData) return null;
 
-  const formatOptions = mediaData.formats || [
-    { label: 'MP4 - 1080p', value: 'mp4-1080p', size: null },
-    { label: 'MP4 - 720p', value: 'mp4-720p', size: null },
-    { label: 'MP4 - 480p', value: 'mp4-480p', size: null },
-    { label: 'MP3 - Audio Only', value: 'mp3-audio', size: null },
-  ];
-
   const formatDuration = (seconds) => {
     if (!seconds) return '';
     const mins = Math.floor(seconds / 60);
@@ -47,24 +56,53 @@ const MediaDownloader = ({ loading, mediaData }) => {
   const handleDownload = async () => {
     try {
       setDownloading(true);
-      await downloadMediaPayload({
-        type: 'single',
-        title: mediaData.title,
-        url: mediaData.url,
-        format: selectedFormat,
-      });
+
+      const chosenOption = formatOptions.find(
+        (opt) => opt.value === selectedFormat
+      );
+
+      const currentInputUrl =
+        mediaData?.original_platform_url ||
+        mediaData?.url ||
+        mediaData?.original_url ||
+        mediaData?.webpage_url ||
+        targetUrl;
+
+      const payload = {
+  type: 'single',
+  title: mediaData.title,
+  url: currentInputUrl,
+  original_platform_url: currentInputUrl,
+  direct_url:
+    chosenOption?.direct_url ||
+    mediaData.direct_url ||
+    mediaData.download_url,
+  format: chosenOption?.rawQuality || selectedFormat || 'best',
+  audio_only: selectedFormat === 'mp3-audio',
+  available_qualities: mediaData.available_qualities,
+};
+
+      await downloadMediaPayload(payload, notify, currentInputUrl);
     } catch (err) {
-      console.error('Download error:', err);
+      if (notify) {
+        notify(err.message || 'Download failed. Please try again.', 'error');
+      }
     } finally {
       setDownloading(false);
     }
   };
 
-  const selectedOption = formatOptions.find((opt) => opt.value === selectedFormat) || formatOptions[0];
+  const selectedOption =
+    formatOptions.find((opt) => opt.value === selectedFormat) ||
+    formatOptions[0];
 
   return (
-    <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
-      {/* Thumbnail Section */}
+    <View
+      style={[
+        styles.card,
+        { backgroundColor: theme.card, borderColor: theme.border },
+      ]}
+    >
       {mediaData.thumbnail && (
         <View style={styles.thumbnailWrapper}>
           <Image
@@ -74,13 +112,14 @@ const MediaDownloader = ({ loading, mediaData }) => {
           />
           {mediaData.duration > 0 && (
             <View style={styles.durationBadge}>
-              <Text style={styles.durationText}>{formatDuration(mediaData.duration)}</Text>
+              <Text style={styles.durationText}>
+                {formatDuration(mediaData.duration)}
+              </Text>
             </View>
           )}
         </View>
       )}
 
-      {/* Details */}
       <View style={styles.detailsContainer}>
         <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
           {mediaData.title}
@@ -92,16 +131,19 @@ const MediaDownloader = ({ loading, mediaData }) => {
         )}
       </View>
 
-      {/* Dropdown Menu */}
       <View style={styles.dropdownContainer}>
         <Text style={[styles.label, { color: theme.text }]}>Select Quality</Text>
         <TouchableOpacity
-          style={[styles.dropdownTrigger, { borderColor: theme.border, backgroundColor: theme.background }]}
+          style={[
+            styles.dropdownTrigger,
+            { borderColor: theme.border, backgroundColor: theme.background },
+          ]}
           onPress={() => setDropdownOpen(!dropdownOpen)}
           activeOpacity={0.7}
         >
           <Text style={[styles.dropdownTriggerText, { color: theme.text }]}>
-            {selectedOption.label} {selectedOption.size ? `(${selectedOption.size})` : ''}
+            {selectedOption?.label}{' '}
+            {selectedOption?.size ? `(${selectedOption.size})` : ''}
           </Text>
           <Ionicons
             name={dropdownOpen ? 'chevron-up' : 'chevron-down'}
@@ -110,15 +152,21 @@ const MediaDownloader = ({ loading, mediaData }) => {
           />
         </TouchableOpacity>
 
-        {/* Dropdown Items List */}
         {dropdownOpen && (
-          <View style={[styles.optionsMenu, { backgroundColor: theme.background, borderColor: theme.border }]}>
+          <View
+            style={[
+              styles.optionsMenu,
+              { backgroundColor: theme.background, borderColor: theme.border },
+            ]}
+          >
             {formatOptions.map((item) => (
               <TouchableOpacity
                 key={item.value}
                 style={[
                   styles.optionItem,
-                  selectedFormat === item.value && { backgroundColor: theme.primary + '20' },
+                  selectedFormat === item.value && {
+                    backgroundColor: theme.primary + '20',
+                  },
                 ]}
                 onPress={() => {
                   setSelectedFormat(item.value);
@@ -129,7 +177,12 @@ const MediaDownloader = ({ loading, mediaData }) => {
                   <Text
                     style={[
                       styles.optionText,
-                      { color: selectedFormat === item.value ? theme.primary : theme.text },
+                      {
+                        color:
+                          selectedFormat === item.value
+                            ? theme.primary
+                            : theme.text,
+                      },
                     ]}
                   >
                     {item.label}
@@ -150,7 +203,6 @@ const MediaDownloader = ({ loading, mediaData }) => {
         )}
       </View>
 
-      {/* Action Button */}
       <TouchableOpacity
         style={[styles.actionButton, { backgroundColor: theme.primary }]}
         onPress={handleDownload}
@@ -161,10 +213,13 @@ const MediaDownloader = ({ loading, mediaData }) => {
           <ActivityIndicator size="small" color="#FFFFFF" />
         ) : (
           <>
-            <Ionicons name="cloud-download-outline" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
-            <Text style={styles.actionButtonText}>
-              Start Download
-            </Text>
+            <Ionicons
+              name="cloud-download-outline"
+              size={20}
+              color="#FFFFFF"
+              style={{ marginRight: 8 }}
+            />
+            <Text style={styles.actionButtonText}>Start Download</Text>
           </>
         )}
       </TouchableOpacity>

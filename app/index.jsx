@@ -167,12 +167,14 @@ const Home = () => {
                             onPress={handleDownload}
                             activeOpacity={0.8}
                         >
-                            <Ionicons name="download-outline" size={20} color={theme.text} style={{ marginRight: 8 }} />
-                            <Text style={[styles.downloadButtonText, { color: theme.text }]}>Download</Text>
+                            <Ionicons name="download-outline" size={20} color='#fff' style={{ marginRight: 8 }} />
+                            {/* <Text style={[styles.downloadButtonText, { color: theme.text }]}>Download</Text> */}
+                            <Text style={styles.downloadButtonText}>Download</Text>
+
                         </TouchableOpacity>
                     )}
 
-                    <MediaDownloader loading={loading} mediaData={mediaData} />
+                    <MediaDownloader loading={loading} mediaData={mediaData} targetUrl={url} notify={showNotification} />
                 </Animated.View>
             </ScrollView>
 
@@ -231,5 +233,6 @@ const styles = StyleSheet.create({
     downloadButtonText: {
         fontSize: 16,
         fontWeight: '600',
+        color: '#ffffff'
     },
 });

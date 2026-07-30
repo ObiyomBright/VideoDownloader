@@ -1,14 +1,47 @@
-import { StyleSheet, Text, View } from 'react-native'
-import React from 'react'
+import React from 'react';
+import { StyleSheet, Text, ScrollView } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import useAppTheme from '../utils/Theme';
+import { useThemeStore } from '../stores/useThemeStore';
+import ThemeToggleSection from '../components/settings/ThemeToggleSection';
+import StorageSection from '../components/settings/StorageSection';
+import PathSection from '../components/settings/PathSection';
 
 const Settings = () => {
+  const theme = useAppTheme();
+  const isDarkMode = useThemeStore((state) => state.isDarkMode);
+  const toggleTheme = useThemeStore((state) => state.toggleTheme);
+
   return (
-    <View safe={true}>
-      <Text>Settings</Text>
-    </View>
-  )
-}
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <Text style={[styles.headerTitle, { color: theme.text }]}>Settings</Text>
 
-export default Settings
+        <ThemeToggleSection isDark={isDarkMode} onToggleTheme={toggleTheme} />
+        <StorageSection />
+        <PathSection />
+      </ScrollView>
+    </SafeAreaView>
+  );
+};
 
-const styles = StyleSheet.create({})
+export default Settings;
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 32,
+  },
+  headerTitle: {
+    fontSize: 26,
+    fontWeight: '800',
+    marginBottom: 20,
+  },
+});
