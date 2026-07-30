@@ -82,13 +82,21 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
         available_qualities: mediaData.available_qualities,
       };
 
-      await downloadMediaPayload(payload, notify, currentInputUrl);
-    } catch (err) {
+      // 1. Notify the user immediately that download is starting
       if (notify) {
-        notify(err.message || 'Download failed. Please try again.', 'error');
+        notify('Download started in background...', 'info');
       }
-    } finally {
+
+      // 2. Re-enable the button right away
       setDownloading(false);
+
+      // 3. Trigger the background payload download asynchronously
+      downloadMediaPayload(payload, notify, currentInputUrl);
+    } catch (err) {
+      setDownloading(false);
+      if (notify) {
+        notify(err.message || 'Download failed to start.', 'error');
+      }
     }
   };
 
@@ -141,7 +149,6 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
           onPress={() => setDropdownOpen(!dropdownOpen)}
           activeOpacity={0.7}
         >
-          {/* Displays label directly (which already includes the formatted size) */}
           <Text style={[styles.dropdownTriggerText, { color: theme.text }]}>
             {selectedOption?.label}
           </Text>
@@ -174,7 +181,6 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
                 }}
               >
                 <View style={styles.optionLabelGroup}>
-                  {/* Clean text display without secondary size badge */}
                   <Text
                     style={[
                       styles.optionText,
