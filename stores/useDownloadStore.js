@@ -1,19 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { Storage } from 'expo-sqlite/kv-store';
-
-const expoKvStorage = {
-  getItem: async (name) => {
-    const value = await Storage.getItem(name);
-    return value ?? null;
-  },
-  setItem: async (name, value) => {
-    await Storage.setItem(name, value);
-  },
-  removeItem: async (name) => {
-    await Storage.removeItem(name);
-  },
-};
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const activeDownloadTasks = new Map();
 
@@ -102,7 +89,7 @@ export const useDownloadStore = create(
       },
 
       resumeAllDownloads: () => {
-        // Optimistically set all paused/failed items to downloading/pending immediately
+        // Optimistically set all paused/failed items to downloading immediately
         set((state) => ({
           downloads: state.downloads.map((item) =>
             item.status === 'paused' || item.status === 'failed'
@@ -184,7 +171,7 @@ export const useDownloadStore = create(
     }),
     {
       name: 'download-history-storage',
-      storage: createJSONStorage(() => expoKvStorage),
+      storage: createJSONStorage(() => AsyncStorage),
       partialize: (state) => ({
         downloads: state.downloads
           .filter((d) => d.status === 'completed' || d.status === 'failed' || d.status === 'paused')

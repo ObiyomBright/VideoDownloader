@@ -1,6 +1,8 @@
-import * as FileSystem from 'expo-file-system/legacy';
+import { Alert } from 'react-native';
+import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import { useDownloadStore } from '../stores/useDownloadStore';
+import { useSettingsStore } from '../stores/useSettingsStore';
 
 const API_BASE_URL = 'http://10.0.2.2:8000';
 
@@ -140,7 +142,8 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
       fileName,
       title,
       notify,
-      downloadId
+      downloadId,
+      isAudio
     );
 
     // Pass the calculated file size into completeDownload so it replaces 'Unknown'
@@ -151,15 +154,10 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
   }
 };
 
-const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId) => {
-  const permission = await MediaLibrary.requestPermissionsAsync(true);
-  if (!permission.granted) {
-    if (notify) notify('Storage permission required to save files.', 'error');
-    throw new Error('Permission denied');
-  }
-
+const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId, isAudio) => {
   const fileUri = `${FileSystem.documentDirectory}${fileName}`;
   const { updateProgress } = useDownloadStore.getState();
+  const { downloadUri } = useSettingsStore.getState();
 
   // 1. Progress callback driving the Zustand store updates
   const callback = (downloadProgress) => {
@@ -179,6 +177,9 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
     {},
     callback
   );
+
+  // Register instance to support pausing during active download
+  useDownloadStore.getState().registerResumable(downloadId, downloadResumable);
 
   const result = await downloadResumable.downloadAsync();
 
@@ -210,24 +211,49 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
 
   // 3. Format actual downloaded size from disk
   const formattedSize = formatBytes(fileInfo.size);
+  let finalUri = result.uri;
 
-  // 4. Save asset to system gallery/downloads folder
+  // 4. Save file to either configured custom SAF folder or default MediaLibrary album
   try {
-    const asset = await MediaLibrary.createAssetAsync(result.uri);
-    const album = await MediaLibrary.getAlbumAsync('Downloads');
+    if (downloadUri && FileSystem.StorageAccessFramework) {
+      const mimeType = isAudio ? 'audio/mpeg' : 'video/mp4';
+      const fileData = await FileSystem.readAsStringAsync(result.uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
 
-    if (album === null) {
-      await MediaLibrary.createAlbumAsync('Downloads', asset, false);
+      const safariTargetUri = await FileSystem.StorageAccessFramework.createFileAsync(
+        downloadUri,
+        fileName,
+        mimeType
+      );
+
+      await FileSystem.StorageAccessFramework.writeAsStringAsync(
+        safariTargetUri,
+        fileData,
+        { encoding: FileSystem.EncodingType.Base64 }
+      );
+
+      finalUri = safariTargetUri;
     } else {
-      await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
+      const permission = await MediaLibrary.requestPermissionsAsync(true);
+      if (permission.granted) {
+        const asset = await MediaLibrary.createAssetAsync(result.uri);
+        const album = await MediaLibrary.getAlbumAsync('Downloads');
+
+        if (album === null) {
+          await MediaLibrary.createAlbumAsync('Downloads', asset, false);
+        } else {
+          await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
+        }
+      }
     }
   } catch (mediaError) {
-    console.warn('MediaLibrary save warning:', mediaError);
+    console.warn('Storage save warning:', mediaError);
   }
 
   if (notify) notify(`Saved "${title}" successfully!`, 'success');
 
-  return { uri: result.uri, formattedSize };
+  return { uri: finalUri, formattedSize };
 };
 
 export const startOrResumeDownload = async (item) => {

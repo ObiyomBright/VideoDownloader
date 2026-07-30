@@ -1,12 +1,29 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
 import useAppTheme from '../../utils/Theme';
+import { useSettingsStore } from '../../stores/useSettingsStore';
+
+// Utility to make SAF URIs human-readable in the UI
+const getReadablePath = (uri) => {
+  if (!uri) return 'Default (Downloads)';
+  try {
+    const decoded = decodeURIComponent(uri);
+    // SAF URIs typically look like content://com.android.providers.downloads.documents/tree/primary:Download/Videos
+    const parts = decoded.split(':');
+    if (parts.length > 1) {
+      return `Internal Storage > ${parts[parts.length - 1]}`;
+    }
+    return decoded;
+  } catch (e) {
+    return 'Custom Folder Selected';
+  }
+};
 
 const PathSection = () => {
   const theme = useAppTheme();
-  const [downloadPath, setDownloadPath] = useState('Downloads/VideoDownloader');
+  const { downloadUri, setDownloadUri } = useSettingsStore();
 
   const handleSelectDirectory = async () => {
     try {
@@ -15,44 +32,36 @@ const PathSection = () => {
           await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
 
         if (permissions.granted) {
-          const selectedUri = permissions.directoryUri;
-          const decodedPath = decodeURIComponent(selectedUri);
-          const folderName = decodedPath.split(':').pop() || 'Selected Directory';
-
-          setDownloadPath(folderName);
-          Alert.alert('Download Path Updated', `Media will now save to: ${folderName}`);
+          setDownloadUri(permissions.directoryUri);
+          Alert.alert('Path Updated', 'Downloads will now be saved to your selected folder.');
         }
       } else {
         Alert.alert(
-          'Default Gallery Path Active',
-          'Your downloads are stored automatically in your media library album ("Downloads").'
+          'Default Storage',
+          'Storage Access Framework is not available on this device. Media will be saved to your default system gallery.'
         );
       }
     } catch (error) {
       console.error('Directory permission error:', error);
+      Alert.alert('Error', 'Could not open folder picker.');
     }
   };
+
+  const displayPath = getReadablePath(downloadUri);
 
   return (
     <View style={[styles.sectionCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
       <Text style={[styles.sectionTitle, { color: theme.subtext }]}>DOWNLOAD LOCATION</Text>
-
-      <TouchableOpacity
-        style={styles.row}
-        onPress={handleSelectDirectory}
-        activeOpacity={0.7}
-      >
+      <TouchableOpacity style={styles.row} onPress={handleSelectDirectory} activeOpacity={0.7}>
         <View style={styles.iconWrapper}>
           <Ionicons name="folder-open-outline" size={20} color={theme.primary} />
         </View>
-
         <View style={styles.rowContent}>
           <Text style={[styles.rowTitle, { color: theme.text }]}>Save Path</Text>
           <Text style={[styles.rowSubtitle, { color: theme.subtext }]} numberOfLines={1}>
-            {downloadPath}
+            {displayPath}
           </Text>
         </View>
-
         <Ionicons name="chevron-forward" size={18} color={theme.subtext} />
       </TouchableOpacity>
     </View>

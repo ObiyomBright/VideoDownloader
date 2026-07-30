@@ -4,12 +4,25 @@ import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
 import useAppTheme from '../../utils/Theme';
 
+// Dynamic byte formatter (handles B, KB, MB, GB, TB)
+const formatBytes = (bytes, decimals = 2) => {
+  if (!bytes || isNaN(bytes) || bytes === 0) return '0 B';
+
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+};
+
 const StorageSection = () => {
   const theme = useAppTheme();
   const [loading, setLoading] = useState(true);
-  const [appSpace, setAppSpace] = useState('0 MB');
-  const [freeStorage, setFreeStorage] = useState('0 GB');
-  const [totalStorage, setTotalStorage] = useState('0 GB');
+  const [appSpace, setAppSpace] = useState('0 B');
+  const [freeStorage, setFreeStorage] = useState('0 B');
+  const [totalStorage, setTotalStorage] = useState('0 B');
 
   useEffect(() => {
     calculateSpace();
@@ -19,31 +32,34 @@ const StorageSection = () => {
     try {
       setLoading(true);
 
-      // 1. Fetch total and free disk space on device
+      // 1. Fetch total and free disk space on device using legacy API
       const freeBytes = await FileSystem.getFreeDiskStorageAsync();
       const totalBytes = await FileSystem.getTotalDiskCapacityAsync();
 
-      setFreeStorage((freeBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB');
-      setTotalStorage((totalBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB');
+      setFreeStorage(formatBytes(freeBytes));
+      setTotalStorage(formatBytes(totalBytes));
 
       // 2. Calculate VideoDownloader storage usage in Document Directory
       if (FileSystem.documentDirectory) {
         const dirInfo = await FileSystem.getInfoAsync(FileSystem.documentDirectory);
-        if (dirInfo.exists && dirInfo.size) {
-          setAppSpace((dirInfo.size / (1024 * 1024)).toFixed(2) + ' MB');
+
+        if (dirInfo.exists && typeof dirInfo.size === 'number' && dirInfo.size > 0) {
+          setAppSpace(formatBytes(dirInfo.size));
         } else {
-          // Fallback manual calculate if size isn't returned at root dir level
+          // Fallback manual calculation if root directory size isn't directly returned
           const files = await FileSystem.readDirectoryAsync(FileSystem.documentDirectory);
           let totalSize = 0;
+
           for (const file of files) {
             const fileInfo = await FileSystem.getInfoAsync(
               `${FileSystem.documentDirectory}${file}`
             );
-            if (fileInfo.exists && fileInfo.size) {
+            if (fileInfo.exists && typeof fileInfo.size === 'number') {
               totalSize += fileInfo.size;
             }
           }
-          setAppSpace((totalSize / (1024 * 1024)).toFixed(2) + ' MB');
+
+          setAppSpace(formatBytes(totalSize));
         }
       }
     } catch (err) {

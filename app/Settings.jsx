@@ -6,6 +6,7 @@ import { useThemeStore } from '../stores/useThemeStore';
 import ThemeToggleSection from '../components/settings/ThemeToggleSection';
 import StorageSection from '../components/settings/StorageSection';
 import PathSection from '../components/settings/PathSection';
+import AboutSection from '../components/settings/AboutSection';
 
 const Settings = () => {
   const theme = useAppTheme();
@@ -23,6 +24,7 @@ const Settings = () => {
         <ThemeToggleSection isDark={isDarkMode} onToggleTheme={toggleTheme} />
         <StorageSection />
         <PathSection />
+        <AboutSection />
       </ScrollView>
     </SafeAreaView>
   );

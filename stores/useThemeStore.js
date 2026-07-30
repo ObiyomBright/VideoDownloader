@@ -1,19 +1,31 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Appearance } from 'react-native';
 
 const getInitialDarkMode = () => Appearance.getColorScheme() === 'dark';
 
-export const useThemeStore = create((set) => ({
-  isDarkMode: getInitialDarkMode(),
-  toggleTheme: () =>
-    set((state) => ({
-      isDarkMode: !state.isDarkMode,
-    })),
-  setDarkMode: (isDark) =>
-    set(() => ({
-      isDarkMode: isDark,
-    })),
-}));
+export const useThemeStore = create(
+  persist(
+    (set) => ({
+      isDarkMode: getInitialDarkMode(),
+
+      toggleTheme: () =>
+        set((state) => ({
+          isDarkMode: !state.isDarkMode,
+        })),
+
+      setDarkMode: (isDark) =>
+        set(() => ({
+          isDarkMode: isDark,
+        })),
+    }),
+    {
+      name: 'app-theme-storage',
+      storage: createJSONStorage(() => AsyncStorage),
+    }
+  )
+);
 
 export const getThemeColors = (isDarkMode) => ({
   dark: isDarkMode,
