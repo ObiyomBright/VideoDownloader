@@ -69,18 +69,18 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
         targetUrl;
 
       const payload = {
-  type: 'single',
-  title: mediaData.title,
-  url: currentInputUrl,
-  original_platform_url: currentInputUrl,
-  direct_url:
-    chosenOption?.direct_url ||
-    mediaData.direct_url ||
-    mediaData.download_url,
-  format: chosenOption?.rawQuality || selectedFormat || 'best',
-  audio_only: selectedFormat === 'mp3-audio',
-  available_qualities: mediaData.available_qualities,
-};
+        type: 'single',
+        title: mediaData.title,
+        url: currentInputUrl,
+        original_platform_url: currentInputUrl,
+        direct_url:
+          chosenOption?.direct_url ||
+          mediaData.direct_url ||
+          mediaData.download_url,
+        format: chosenOption?.rawQuality || selectedFormat || 'best',
+        audio_only: selectedFormat === 'mp3-audio',
+        available_qualities: mediaData.available_qualities,
+      };
 
       await downloadMediaPayload(payload, notify, currentInputUrl);
     } catch (err) {
@@ -141,9 +141,9 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
           onPress={() => setDropdownOpen(!dropdownOpen)}
           activeOpacity={0.7}
         >
+          {/* Displays label directly (which already includes the formatted size) */}
           <Text style={[styles.dropdownTriggerText, { color: theme.text }]}>
-            {selectedOption?.label}{' '}
-            {selectedOption?.size ? `(${selectedOption.size})` : ''}
+            {selectedOption?.label}
           </Text>
           <Ionicons
             name={dropdownOpen ? 'chevron-up' : 'chevron-down'}
@@ -159,9 +159,9 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
               { backgroundColor: theme.background, borderColor: theme.border },
             ]}
           >
-            {formatOptions.map((item) => (
+            {formatOptions.map((item, index) => (
               <TouchableOpacity
-                key={item.value}
+                key={item.value || `opt-${index}`}
                 style={[
                   styles.optionItem,
                   selectedFormat === item.value && {
@@ -174,6 +174,7 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
                 }}
               >
                 <View style={styles.optionLabelGroup}>
+                  {/* Clean text display without secondary size badge */}
                   <Text
                     style={[
                       styles.optionText,
@@ -187,11 +188,6 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
                   >
                     {item.label}
                   </Text>
-                  {item.size && (
-                    <Text style={[styles.sizeBadgeText, { color: theme.subtext }]}>
-                      {item.size}
-                    </Text>
-                  )}
                 </View>
 
                 {selectedFormat === item.value && (
@@ -326,9 +322,6 @@ const styles = StyleSheet.create({
   optionText: {
     fontSize: 14,
     fontWeight: '500',
-  },
-  sizeBadgeText: {
-    fontSize: 12,
   },
   actionButton: {
     height: 48,

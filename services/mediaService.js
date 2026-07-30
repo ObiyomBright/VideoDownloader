@@ -10,6 +10,15 @@ const extractCleanUrl = (text) => {
   return match ? match[0] : text.trim();
 };
 
+// Helper to format bytes into readable string (e.g. 14.5 MB)
+const formatBytes = (bytes) => {
+  if (!bytes || isNaN(bytes) || bytes === 0) return null;
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+};
+
 export const fetchMediaInfo = async (inputUrl) => {
   const cleanUrl = extractCleanUrl(inputUrl);
   if (!cleanUrl) throw new Error('Please enter a valid media URL.');
@@ -26,21 +35,56 @@ export const fetchMediaInfo = async (inputUrl) => {
 
   const data = await response.json();
 
-  const formattedQualities = Array.isArray(data.available_qualities)
+  const rawQualities = Array.isArray(data.available_qualities)
     ? data.available_qualities
-        .filter((q) => q && (q.quality || q.format_id))
-        .map((q, index) => {
-          const rawQuality = String(q.quality || q.format_id || 'HD');
-          return {
-            label: `${q.ext ? q.ext.toUpperCase() : 'MP4'} - ${rawQuality}`,
-            // Append format_id or index to prevent duplicate keys when resolutions match
-            value: q.format_id ? `${rawQuality}_${q.format_id}` : `${rawQuality}_${index}`,
-            rawQuality: rawQuality,
-            size: q.filesize_str || null,
-            direct_url: q.direct_url || null,
-          };
-        })
     : [];
+
+  // Filter out non-video formats (storyboards, audio-only formats, duplicates)
+  const validQualities = rawQualities.filter((q) => {
+    if (!q) return false;
+    const vcodec = q.vcodec ? String(q.vcodec) : '';
+    // Exclude audio-only or invalid video streams if checking raw ytdlp format objects
+    if (vcodec === 'none') return false;
+
+    // Must have a resolution/quality key or format_id
+    return Boolean(q.quality || q.height || q.format_id);
+  });
+
+  // Deduplicate by resolution while keeping the best format entry per resolution
+  const uniqueQualityMap = new Map();
+
+  validQualities.forEach((q) => {
+    // Format label resolution (e.g., "1080p", "720p", "1080x1080")
+    const resolution = String(
+      q.quality || (q.height ? `${q.height}p` : q.format_id)
+    );
+
+    // Calculate file size from byte attributes if filesize_str is missing
+    const computedSize =
+      q.filesize_str ||
+      formatBytes(q.filesize || q.filesize_approx) ||
+      null;
+
+    const ext = q.ext ? q.ext.toUpperCase() : 'MP4';
+
+    // Build the option object
+    const option = {
+      label: computedSize
+        ? `${ext} - ${resolution} (${computedSize})`
+        : `${ext} - ${resolution}`,
+      value: q.format_id ? `${resolution}_${q.format_id}` : resolution,
+      rawQuality: resolution,
+      size: computedSize || 'Size variable',
+      direct_url: q.direct_url || null,
+    };
+
+    // Keep the entry with known size or first occurrences
+    if (!uniqueQualityMap.has(resolution) || computedSize) {
+      uniqueQualityMap.set(resolution, option);
+    }
+  });
+
+  const formattedQualities = Array.from(uniqueQualityMap.values());
 
   return {
     title: data.title || 'Untitled Video',
