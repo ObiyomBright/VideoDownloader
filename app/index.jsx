@@ -9,6 +9,8 @@ import {
     Keyboard,
     Platform,
     Easing,
+    Image,
+    useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
@@ -27,7 +29,9 @@ const Home = () => {
     const [modalVisible, setModalVisible] = useState(false);
     const [loading, setLoading] = useState(false);
     const [mediaData, setMediaData] = useState(null);
+    const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
 
+    const { height: screenHeight } = useWindowDimensions();
     const theme = useAppTheme();
     const { showNotification } = useNotification();
 
@@ -38,6 +42,7 @@ const Home = () => {
         const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
 
         const onKeyboardShow = (event) => {
+            setIsKeyboardVisible(true);
             const shiftDistance = mediaData ? -120 : -80;
 
             Animated.timing(translateY, {
@@ -49,6 +54,7 @@ const Home = () => {
         };
 
         const onKeyboardHide = (event) => {
+            setIsKeyboardVisible(false);
             Animated.timing(translateY, {
                 toValue: 0,
                 duration: event.duration || 200,
@@ -123,6 +129,11 @@ const Home = () => {
         processUrlDownload(url);
     };
 
+    const shouldShowLogo = !isKeyboardVisible && !mediaData;
+
+    // Dynamic sizing calculation bounded between 90px and 150px
+    const dynamicLogoSize = Math.min(Math.max(screenHeight * 0.16, 90), 150);
+
     return (
         <ThemedView style={styles.container} safe={true}>
             <ScrollView
@@ -136,6 +147,23 @@ const Home = () => {
                         { transform: [{ translateY }] },
                     ]}
                 >
+                    {shouldShowLogo && (
+                        <View style={styles.logoContainer}>
+                            <Image
+                                source={require('../assets/logo.png')}
+                                style={[
+                                    styles.logo,
+                                    {
+                                        width: dynamicLogoSize,
+                                        height: dynamicLogoSize,
+                                        borderRadius: dynamicLogoSize * 0.22,
+                                    },
+                                ]}
+                                resizeMode="contain"
+                            />
+                        </View>
+                    )}
+
                     <View style={styles.inputContainer}>
                         <ThemedInput
                             placeholder="Paste a video or file URL"
@@ -167,10 +195,8 @@ const Home = () => {
                             onPress={handleDownload}
                             activeOpacity={0.8}
                         >
-                            <Ionicons name="download-outline" size={20} color='#fff' style={{ marginRight: 8 }} />
-                            {/* <Text style={[styles.downloadButtonText, { color: theme.text }]}>Download</Text> */}
+                            <Ionicons name="download-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
                             <Text style={styles.downloadButtonText}>Download</Text>
-
                         </TouchableOpacity>
                     )}
 
@@ -206,6 +232,14 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
+    logoContainer: {
+        marginBottom: 32,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    logo: {
+        // Dynamic properties (width, height, borderRadius) overridden inline
+    },
     inputContainer: {
         width: '100%',
         height: 56,
@@ -233,6 +267,6 @@ const styles = StyleSheet.create({
     downloadButtonText: {
         fontSize: 16,
         fontWeight: '600',
-        color: '#ffffff'
+        color: '#ffffff',
     },
 });

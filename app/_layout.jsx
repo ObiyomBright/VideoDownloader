@@ -3,6 +3,7 @@ import { Tabs } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import * as NavigationBar from "expo-navigation-bar";
+import * as SystemUI from "expo-system-ui";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Platform } from "react-native";
 
@@ -17,8 +18,25 @@ const RootLayout = () => {
 
     useEffect(() => {
         if (Platform.OS === 'android') {
-            NavigationBar.setButtonStyleAsync(isDark ? "light" : "dark");
-            NavigationBar.setBackgroundColorAsync(theme.background);
+            const syncNativeTheme = async () => {
+                try {
+                    // 1. Change the underlying native window background (eliminates the default white root)
+                    await SystemUI.setBackgroundColorAsync(theme.background);
+
+                    // 2. Disable Android's forced white contrast scrim
+                    await NavigationBar.setEnforceContrastAsync(false);
+
+                    // 3. Set navigation bar background color to match current theme
+                    await NavigationBar.setBackgroundColorAsync(theme.background);
+
+                    // 4. Update button icon contrast (light icons for dark mode, dark icons for light mode)
+                    await NavigationBar.setButtonStyleAsync(isDark ? "light" : "dark");
+                } catch (error) {
+                    console.error("Error setting navigation bar style:", error);
+                }
+            };
+
+            syncNativeTheme();
         }
     }, [theme.background, isDark]);
 

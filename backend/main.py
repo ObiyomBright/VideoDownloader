@@ -98,6 +98,7 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
         'nocheckcertificate': True,
         'geo_bypass': True,
         'concurrent_fragment_downloads': 5,
+        'prefer_ffmpeg': True,
         
         # Youtube Client fallbacks to bypass bot blocks
         'extractor_args': {
