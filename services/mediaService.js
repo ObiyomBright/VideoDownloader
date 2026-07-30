@@ -109,7 +109,6 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
     throw new Error(errorMsg);
   }
 
-  // Retrieve store methods safely outside a React Component lifecycle
   const { addDownload, completeDownload, failDownload, updateProgress } =
     useDownloadStore.getState();
 
@@ -119,16 +118,16 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
   const extension = isAudio ? 'mp3' : 'mp4';
   const fileName = `${cleanTitle}_${Date.now()}.${extension}`;
 
-  // 1. Add item to download store (Status: 'downloading')
   const downloadId = addDownload({
     title: title,
     url: platformUrl,
-    fileSize: payload.size || 'Unknown',
+    fileSize: payload.size && payload.size !== 'Size variable' ? payload.size : 'Unknown',
     thumbnail: payload.thumbnail || null,
+    duration: payload.duration || null,
     quality: payload.format || 'HD',
   });
 
-  updateProgress(downloadId, 0.1, 'downloading');
+  updateProgress(downloadId, 0.01, 'downloading');
 
   const selectedQuality = payload.format || 'best';
   const downloadEndpoint = `${API_BASE_URL}/api/v1/download?url=${encodeURIComponent(
@@ -136,18 +135,23 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
   )}&quality=${encodeURIComponent(selectedQuality)}&audio_only=${isAudio}`;
 
   try {
-    // 2. Download to local storage & media library
-    const savedUri = await downloadToDevice(downloadEndpoint, fileName, title, notify);
+    const { uri, formattedSize } = await downloadToDevice(
+      downloadEndpoint,
+      fileName,
+      title,
+      notify,
+      downloadId
+    );
 
-    // 3. Update store status to 'completed' with local file URI
-    completeDownload(downloadId, savedUri);
+    // Pass the calculated file size into completeDownload so it replaces 'Unknown'
+    completeDownload(downloadId, uri, formattedSize);
   } catch (error) {
     failDownload(downloadId, error.message);
     throw error;
   }
 };
 
-const downloadToDevice = async (downloadUrl, fileName, title, notify) => {
+const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId) => {
   const permission = await MediaLibrary.requestPermissionsAsync(true);
   if (!permission.granted) {
     if (notify) notify('Storage permission required to save files.', 'error');
@@ -155,11 +159,25 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify) => {
   }
 
   const fileUri = `${FileSystem.documentDirectory}${fileName}`;
+  const { updateProgress } = useDownloadStore.getState();
 
+  // 1. Progress callback driving the Zustand store updates
+  const callback = (downloadProgress) => {
+    const progress =
+      downloadProgress.totalBytesWritten /
+      downloadProgress.totalBytesExpectedToWrite;
+
+    if (!isNaN(progress) && progress >= 0) {
+      updateProgress(downloadId, progress, 'downloading');
+    }
+  };
+
+  // 2. Create download task with continuous progress listener
   const downloadResumable = FileSystem.createDownloadResumable(
     downloadUrl,
     fileUri,
-    {}
+    {},
+    callback
   );
 
   const result = await downloadResumable.downloadAsync();
@@ -172,6 +190,7 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify) => {
 
   const fileInfo = await FileSystem.getInfoAsync(result.uri);
 
+  // Validate downloaded file integrity
   if (!fileInfo.exists || fileInfo.size < 2000) {
     let serverError = '';
     try {
@@ -189,11 +208,83 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify) => {
     throw new Error(errorMsg);
   }
 
-  const asset = await MediaLibrary.createAssetAsync(result.uri);
-  await MediaLibrary.createAlbumAsync('Downloads', asset, false);
+  // 3. Format actual downloaded size from disk
+  const formattedSize = formatBytes(fileInfo.size);
+
+  // 4. Save asset to system gallery/downloads folder
+  try {
+    const asset = await MediaLibrary.createAssetAsync(result.uri);
+    const album = await MediaLibrary.getAlbumAsync('Downloads');
+
+    if (album === null) {
+      await MediaLibrary.createAlbumAsync('Downloads', asset, false);
+    } else {
+      await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
+    }
+  } catch (mediaError) {
+    console.warn('MediaLibrary save warning:', mediaError);
+  }
 
   if (notify) notify(`Saved "${title}" successfully!`, 'success');
 
-  // Return the saved local file URI so Zustand can store it for playback
-  return result.uri;
+  return { uri: result.uri, formattedSize };
+};
+
+export const startOrResumeDownload = async (item) => {
+  const store = useDownloadStore.getState();
+  const fileUri = `${FileSystem.documentDirectory}${Date.now()}_${item.id}.mp4`;
+
+  const callback = (downloadProgress) => {
+    const progress =
+      downloadProgress.totalBytesWritten /
+      downloadProgress.totalBytesExpectedToWrite;
+    store.updateProgress(item.id, progress, 'downloading');
+  };
+
+  let downloadResumable;
+
+  try {
+    if (item.resumeData) {
+      // Resume existing download using saved state
+      downloadResumable = FileSystem.createDownloadResumable(
+        item.url,
+        fileUri,
+        {},
+        callback,
+        item.resumeData
+      );
+    } else {
+      // Create new download instance
+      downloadResumable = FileSystem.createDownloadResumable(
+        item.url,
+        fileUri,
+        {},
+        callback
+      );
+    }
+
+    // Register instance so store can access .pauseAsync()
+    store.registerResumable(item.id, downloadResumable);
+    store.updateProgress(item.id, item.progress || 0, 'downloading');
+
+    const result = await downloadResumable.downloadAsync();
+
+    if (result && result.uri) {
+      store.completeDownload(item.id, result.uri, item.fileSize);
+    } else {
+      throw new Error('No URI returned');
+    }
+  } catch (error) {
+    console.error('Download error / failed to resume:', error);
+
+    // Alert user on failure after attempting resume
+    Alert.alert(
+      'Download Failed',
+      `Unable to resume downloading "${item.title}". Please check your connection and try again.`,
+      [{ text: 'OK' }]
+    );
+
+    // Update status to failed
+    store.failDownload(item.id, 'Download failed');
+  }
 };
