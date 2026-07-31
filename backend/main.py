@@ -43,17 +43,16 @@ async def health_check():
 # 2. LAZY ON-FAILURE ENGINE UPDATER
 # ----------------------------------------------------------------------
 def update_ytdlp_engine():
-    """Forces engine update and clears cache when extraction/download breaks."""
-    logger.info("🔄 Triggering on-demand engine update and cache cleanup...")
+    """Clears engine cache directory on failure to clear invalid playback tokens."""
+    logger.info("🔄 Triggering on-demand engine cache cleanup...")
     try:
-        # 1. Clear yt-dlp cache directory to discard stale extraction tokens
         cache_cmd = [sys.executable, "-m", "yt_dlp", "--rm-cache-dir"]
         subprocess.run(cache_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         logger.info("🧹 Engine cache cleared.")
     except Exception as e:
         logger.error(f"❌ Failed to clear cache: {str(e)}")
 
-# Optional background safety net (runs once every 24 hours during quiet periods)
+# Background safety net (runs once every 24 hours)
 scheduler = BackgroundScheduler()
 scheduler.add_job(update_ytdlp_engine, 'interval', hours=24)
 
@@ -97,7 +96,7 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     return None
 
 def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
-    """Configures yt-dlp with Snaptube-grade bypass options without assertion errors."""
+    """Configures production-grade yt-dlp extraction settings without internal assertion conflicts."""
     base_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -105,21 +104,9 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
         'geo_bypass': True,
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
-        
-        # 'chrome' is the correct string expected by curl_cffi via yt-dlp
-        'impersonate': 'chrome',
-        
-        # Allow default player client selection fallback to avoid internal assertion failures
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'android', 'web'],
-            },
-            'tiktok': {
-                'app_version': '30.0.0',
-            }
-        },
+        'check_formats': False,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
@@ -137,6 +124,24 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
 
     return base_opts
 
+def build_fallback_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
+    """Clean fallback options stripped down to standard extraction parameters."""
+    fallback_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+    }
+
+    cookie_file = get_cookie_file_for_url(url)
+    if cookie_file:
+        fallback_opts['cookiefile'] = cookie_file
+
+    if custom_opts:
+        fallback_opts.update(custom_opts)
+
+    return fallback_opts
+
 def remove_temp_file(filepath: str):
     try:
         if os.path.exists(filepath):
@@ -145,27 +150,29 @@ def remove_temp_file(filepath: str):
         logger.error(f"Failed to cleanup temp file {filepath}: {e}")
 
 # ----------------------------------------------------------------------
-# SYNCHRONOUS WORKER WRAPPERS WITH ON-FAILURE RETRY LOGIC
+# SYNCHRONOUS WORKER WRAPPERS WITH TWO-TIER RETRY LOGIC
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str, opts: dict):
     try:
         with yt_dlp.YoutubeDL(opts) as ytdl:
             return ytdl.extract_info(url, download=False)
-    except (DownloadError, Exception) as first_err:
-        logger.warning(f"⚠️ Extraction failed for {url}. Attempting cache cleanup and retry... Error: {first_err}")
+    except Exception as first_err:
+        logger.warning(f"⚠️ Primary extraction failed for {url}. Switching to fallback engine... Error: {first_err}")
         update_ytdlp_engine()
-        with yt_dlp.YoutubeDL(opts) as ytdl:
+        fallback_opts = build_fallback_ytdlp_options(url, {'skip_download': True})
+        with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
             return ytdl.extract_info(url, download=False)
 
-def _sync_download_media(url: str, opts: dict):
+def _sync_download_media(url: str, opts: dict, raw_custom_opts: dict):
     try:
         with yt_dlp.YoutubeDL(opts) as ytdl:
             info = ytdl.extract_info(url, download=True)
             return ytdl.prepare_filename(info)
-    except (DownloadError, Exception) as first_err:
-        logger.warning(f"⚠️ Download failed for {url}. Attempting cache cleanup and retry... Error: {first_err}")
+    except Exception as first_err:
+        logger.warning(f"⚠️ Primary download failed for {url}. Switching to fallback engine... Error: {first_err}")
         update_ytdlp_engine()
-        with yt_dlp.YoutubeDL(opts) as ytdl:
+        fallback_opts = build_fallback_ytdlp_options(url, raw_custom_opts)
+        with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
             info = ytdl.extract_info(url, download=True)
             return ytdl.prepare_filename(info)
 
@@ -181,7 +188,7 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
         info = await asyncio.to_thread(_sync_extract_info, url, opts)
 
         formats = []
-        if 'formats' in info:
+        if 'formats' in info and isinstance(info['formats'], list):
             for f in info['formats']:
                 if f.get('vcodec') != 'none' or f.get('acodec') != 'none':
                     filesize = f.get('filesize') or f.get('filesize_approx')
@@ -230,15 +237,17 @@ async def download_media(
         post_processors = []
         ext = 'mp4'
 
-    opts = build_ytdlp_options(url, {
+    download_custom_opts = {
         'outtmpl': output_template,
         'format': format_selector,
         'merge_output_format': 'mp4' if not audio_only else None,
         'postprocessors': post_processors,
-    })
+    }
+
+    opts = build_ytdlp_options(url, download_custom_opts)
 
     try:
-        raw_filename = await asyncio.to_thread(_sync_download_media, url, opts)
+        raw_filename = await asyncio.to_thread(_sync_download_media, url, opts, download_custom_opts)
 
         base_path = os.path.splitext(raw_filename)[0]
         final_filename = f"{base_path}.{ext}"
