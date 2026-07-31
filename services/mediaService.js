@@ -112,52 +112,79 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
     throw new Error(errorMsg);
   }
 
-  const { addDownload, completeDownload, failDownload, updateProgress } =
-    useDownloadStore.getState();
+  const { addDownload } = useDownloadStore.getState();
 
   const title = payload.title || 'media_file';
-  const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 45);
   const isAudio = payload.format === 'mp3-audio' || payload.audio_only === true;
-  const extension = isAudio ? 'mp3' : 'mp4';
-  const fileName = `${cleanTitle}_${Date.now()}.${extension}`;
 
-  const downloadId = addDownload({
-    title: title,
+  // Add to queue in store - queue processor manages concurrent execution
+  addDownload({
+    title,
     url: platformUrl,
     fileSize: payload.size && payload.size !== 'Size variable' ? payload.size : 'Unknown',
     thumbnail: payload.thumbnail || null,
     duration: payload.duration || null,
     quality: payload.format || 'HD',
+    isAudio,
   });
+};
 
-  updateProgress(downloadId, 0.01, 'downloading');
+export const executeDownloadTask = async (item, notify) => {
+  const { completeDownload, failDownload } = useDownloadStore.getState();
 
-  const selectedQuality = payload.format || 'best';
+  const title = item.title || 'media_file';
+  const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 45);
+  const extension = item.isAudio ? 'mp3' : 'mp4';
+  const fileName = `${cleanTitle}_${item.id}.${extension}`;
+
+  const selectedQuality = item.quality || 'best';
   const downloadEndpoint = `${API_BASE_URL}/api/v1/download?url=${encodeURIComponent(
-    platformUrl
-  )}&quality=${encodeURIComponent(selectedQuality)}&audio_only=${isAudio}`;
+    item.url
+  )}&quality=${encodeURIComponent(selectedQuality)}&audio_only=${item.isAudio || false}`;
 
   try {
-    const { uri, formattedSize } = await downloadToDevice(
+    const result = await downloadToDevice(
       downloadEndpoint,
       fileName,
       title,
       notify,
-      downloadId,
-      isAudio
+      item.id,
+      item.isAudio,
+      item.resumeData
     );
 
-    // Pass the calculated file size into completeDownload so it replaces 'Unknown'
-    completeDownload(downloadId, uri, formattedSize);
+    if (result?.isPaused) {
+      // User paused the stream - exit gracefully without triggering errors
+      return;
+    }
+
+    if (result && result.success && result.uri) {
+      completeDownload(item.id, result.uri, result.formattedSize);
+    } else {
+      failDownload(item.id, 'Download completed with empty file stream.');
+    }
   } catch (error) {
-    failDownload(downloadId, error.message);
-    throw error;
+    const store = useDownloadStore.getState();
+    const currentItem = store.downloads.find((d) => d.id === item.id);
+
+    if (currentItem?.status !== 'paused') {
+      failDownload(item.id, error.message);
+      if (notify) notify(`Download failed: ${title}`, 'error');
+    }
   }
 };
 
-const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId, isAudio) => {
+const downloadToDevice = async (
+  downloadUrl,
+  fileName,
+  title,
+  notify,
+  downloadId,
+  isAudio,
+  initialResumeData = null
+) => {
   const fileUri = `${FileSystem.documentDirectory}${fileName}`;
-  const { updateProgress } = useDownloadStore.getState();
+  const store = useDownloadStore.getState();
   const { downloadUri } = useSettingsStore.getState();
 
   // 1. Progress callback driving the Zustand store updates
@@ -167,25 +194,51 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
       const progress = downloadProgress.totalBytesWritten / totalExpected;
 
       if (!isNaN(progress) && progress >= 0) {
-        updateProgress(downloadId, progress, 'downloading');
+        store.updateProgress(downloadId, progress, 'downloading');
       }
     }
   };
 
-  // 2. Create download task with continuous progress listener
-  const downloadResumable = FileSystem.createDownloadResumable(
-    downloadUrl,
-    fileUri,
-    {},
-    callback
-  );
+  // 2. Create download task with continuous progress listener (handling resume data)
+  let downloadResumable;
+  if (initialResumeData) {
+    downloadResumable = FileSystem.createDownloadResumable(
+      downloadUrl,
+      fileUri,
+      {},
+      callback,
+      initialResumeData
+    );
+  } else {
+    downloadResumable = FileSystem.createDownloadResumable(
+      downloadUrl,
+      fileUri,
+      {},
+      callback
+    );
+  }
 
   // Register instance to support pausing during active download
-  useDownloadStore.getState().registerResumable(downloadId, downloadResumable);
+  store.registerResumable(downloadId, downloadResumable);
 
-  const result = await downloadResumable.downloadAsync();
+  let result = null;
+  try {
+    result = await downloadResumable.downloadAsync();
+  } catch (err) {
+    // Check if task was paused by user during execution
+    const currentItem = store.downloads.find((d) => d.id === downloadId);
+    if (currentItem?.status === 'paused') {
+      return { isPaused: true, success: false };
+    }
+    throw err;
+  }
 
-  if (!result || !result.uri) {
+  // Handle case where pauseAsync finishes without throwing
+  const currentItem = store.downloads.find((d) => d.id === downloadId);
+  if (currentItem?.status === 'paused' || !result || !result.uri) {
+    if (currentItem?.status === 'paused') {
+      return { isPaused: true, success: false };
+    }
     const errorMsg = 'Failed to download file stream from server.';
     if (notify) notify(errorMsg, 'error');
     throw new Error(errorMsg);
@@ -260,11 +313,18 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
 
   if (notify) notify(`Saved "${title}" successfully!`, 'success');
 
-  return { uri: finalUri, formattedSize };
+  return { uri: finalUri, formattedSize, isPaused: false, success: true };
 };
 
 export const startOrResumeDownload = async (item) => {
   const store = useDownloadStore.getState();
+
+  // Re-queue the task into the engine to handle concurrency safely
+  if (item.status === 'paused' || item.status === 'failed') {
+    store.resumeDownload(item.id);
+    return;
+  }
+
   const fileUri = `${FileSystem.documentDirectory}${Date.now()}_${item.id}.mp4`;
 
   const callback = (downloadProgress) => {
@@ -303,12 +363,23 @@ export const startOrResumeDownload = async (item) => {
 
     const result = await downloadResumable.downloadAsync();
 
+    // Check if task was paused during resume attempt
+    const currentItem = store.downloads.find((d) => d.id === item.id);
+    if (currentItem?.status === 'paused') {
+      return;
+    }
+
     if (result && result.uri) {
       store.completeDownload(item.id, result.uri, item.fileSize);
     } else {
       throw new Error('No URI returned');
     }
   } catch (error) {
+    const currentItem = store.downloads.find((d) => d.id === item.id);
+    if (currentItem?.status === 'paused') {
+      return;
+    }
+
     console.error('Download error / failed to resume:', error);
 
     // Alert user on failure after attempting resume

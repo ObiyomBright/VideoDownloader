@@ -82,16 +82,13 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
         available_qualities: mediaData.available_qualities,
       };
 
-      // 1. Notify the user immediately that download is starting
       if (notify) {
-        notify('Download started in background...', 'info');
+        notify('Added to download queue', 'info');
       }
 
-      // 2. Re-enable the button right away
       setDownloading(false);
 
-      // 3. Trigger the background payload download asynchronously
-      downloadMediaPayload(payload, notify, currentInputUrl);
+      await downloadMediaPayload(payload, notify, currentInputUrl);
     } catch (err) {
       setDownloading(false);
       if (notify) {
@@ -238,6 +235,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 16,
     marginTop: 20,
+    marginBottom: 12,
   },
   loadingContainer: {
     padding: 24,

@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const activeDownloadTasks = new Map();
+const MAX_CONCURRENT_DOWNLOADS = 3;
 
 export const useDownloadStore = create(
   persist(
@@ -11,6 +12,38 @@ export const useDownloadStore = create(
 
       registerResumable: (id, resumableInstance) => {
         activeDownloadTasks.set(id, resumableInstance);
+      },
+
+      // Queue management engine (Snaptube standard max 3 concurrent)
+      processQueue: async () => {
+        const { downloads } = get();
+        
+        const activeCount = downloads.filter(
+          (d) => d.status === 'downloading'
+        ).length;
+
+        if (activeCount >= MAX_CONCURRENT_DOWNLOADS) return;
+
+        const slotsAvailable = MAX_CONCURRENT_DOWNLOADS - activeCount;
+        const queuedItems = downloads.filter((d) => d.status === 'queued');
+        const itemsToStart = queuedItems.slice(0, slotsAvailable);
+
+        if (itemsToStart.length === 0) return;
+
+        // Mark batch as active downloading
+        set((state) => ({
+          downloads: state.downloads.map((item) =>
+            itemsToStart.some((target) => target.id === item.id)
+              ? { ...item, status: 'downloading' }
+              : item
+          ),
+        }));
+
+        const { executeDownloadTask } = require('../services/mediaService');
+
+        itemsToStart.forEach((item) => {
+          executeDownloadTask(item);
+        });
       },
 
       addDownload: (task) => {
@@ -22,14 +55,17 @@ export const useDownloadStore = create(
           thumbnail: task.thumbnail || null,
           duration: task.duration || null,
           quality: task.quality || 'HD',
+          isAudio: task.isAudio || false,
           progress: 0,
-          status: 'pending', // 'pending' | 'downloading' | 'paused' | 'completed' | 'failed'
+          status: 'queued', // 'queued' | 'downloading' | 'paused' | 'completed' | 'failed'
           createdAt: new Date().toISOString(),
           localUri: null,
           resumeData: null,
           error: null,
         };
+
         set((state) => ({ downloads: [newTask, ...state.downloads] }));
+        get().processQueue();
         return newTask.id;
       },
 
@@ -42,13 +78,6 @@ export const useDownloadStore = create(
       },
 
       pauseDownload: async (id) => {
-        // Optimistically set UI state to 'paused' immediately
-        set((state) => ({
-          downloads: state.downloads.map((item) =>
-            item.id === id ? { ...item, status: 'paused' } : item
-          ),
-        }));
-
         const instance = activeDownloadTasks.get(id);
         let savedResumeData = null;
 
@@ -57,60 +86,68 @@ export const useDownloadStore = create(
             const pauseResult = await instance.pauseAsync();
             savedResumeData = pauseResult?.resumeData || null;
           } catch (err) {
-            console.error('Error pausing task:', err);
+            // Task stream cancelled
           }
         }
 
-        if (savedResumeData) {
-          set((state) => ({
-            downloads: state.downloads.map((item) =>
-              item.id === id ? { ...item, resumeData: savedResumeData } : item
-            ),
-          }));
-        }
+        activeDownloadTasks.delete(id);
+
+        set((state) => ({
+          downloads: state.downloads.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  status: 'paused',
+                  resumeData: savedResumeData || item.resumeData,
+                }
+              : item
+          ),
+        }));
+
+        get().processQueue();
+      },
+
+      resumeDownload: (id) => {
+        set((state) => ({
+          downloads: state.downloads.map((item) =>
+            item.id === id
+              ? { ...item, status: 'queued', error: null }
+              : item
+          ),
+        }));
+        get().processQueue();
       },
 
       pauseAllDownloads: async () => {
         const { downloads, pauseDownload } = get();
-        const activeIds = downloads
-          .filter((d) => d.status === 'downloading' || d.status === 'pending')
-          .map((d) => d.id);
+        const activeTasks = downloads.filter(
+          (d) => d.status === 'downloading' || d.status === 'queued'
+        );
 
-        // Optimistically set all active items to paused immediately
+        // Optimistically set queued tasks to paused directly
         set((state) => ({
           downloads: state.downloads.map((item) =>
-            item.status === 'downloading' || item.status === 'pending'
-              ? { ...item, status: 'paused' }
-              : item
+            item.status === 'queued' ? { ...item, status: 'paused' } : item
           ),
         }));
 
-        await Promise.all(activeIds.map((id) => pauseDownload(id)));
+        // Execution pause for live downloads to retain stream binary pointers
+        await Promise.all(
+          activeTasks
+            .filter((d) => d.status === 'downloading')
+            .map((d) => pauseDownload(d.id))
+        );
       },
 
       resumeAllDownloads: () => {
-        // Optimistically set all paused/failed items to downloading immediately
         set((state) => ({
           downloads: state.downloads.map((item) =>
             item.status === 'paused' || item.status === 'failed'
-              ? { ...item, status: 'downloading' }
+              ? { ...item, status: 'queued', error: null }
               : item
           ),
         }));
-      },
-
-      cancelAllPending: async () => {
-        const { downloads, removeDownload } = get();
-        const pendingIds = downloads
-          .filter((d) => d.status !== 'completed')
-          .map((d) => d.id);
-
-        // Optimistically remove pending items immediately
-        set((state) => ({
-          downloads: state.downloads.filter((d) => d.status === 'completed'),
-        }));
-
-        await Promise.all(pendingIds.map((id) => removeDownload(id)));
+        get().processQueue();
       },
 
       completeDownload: (id, localUri, fileSize) => {
@@ -125,10 +162,12 @@ export const useDownloadStore = create(
                   localUri,
                   fileSize: fileSize || item.fileSize,
                   resumeData: null,
+                  error: null,
                 }
               : item
           ),
         }));
+        get().processQueue();
       },
 
       failDownload: (id, errorMsg) => {
@@ -140,11 +179,11 @@ export const useDownloadStore = create(
                   ...item,
                   status: 'failed',
                   error: errorMsg || 'Download failed',
-                  resumeData: null,
                 }
               : item
           ),
         }));
+        get().processQueue();
       },
 
       removeDownload: async (id) => {
@@ -152,15 +191,27 @@ export const useDownloadStore = create(
         if (instance) {
           try {
             await instance.cancelAsync();
-          } catch (e) {
-            // Ignore cancel errors
-          }
+          } catch (e) {}
           activeDownloadTasks.delete(id);
         }
 
         set((state) => ({
           downloads: state.downloads.filter((item) => item.id !== id),
         }));
+        get().processQueue();
+      },
+
+      cancelAllPending: async () => {
+        const { downloads, removeDownload } = get();
+        const nonCompletedIds = downloads
+          .filter((d) => d.status !== 'completed')
+          .map((d) => d.id);
+
+        set((state) => ({
+          downloads: state.downloads.filter((d) => d.status === 'completed'),
+        }));
+
+        await Promise.all(nonCompletedIds.map((id) => removeDownload(id)));
       },
 
       clearCompleted: () => {
@@ -174,8 +225,17 @@ export const useDownloadStore = create(
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (state) => ({
         downloads: state.downloads
-          .filter((d) => d.status === 'completed' || d.status === 'failed' || d.status === 'paused')
-          .map((d) => (d.status === 'downloading' ? { ...d, status: 'paused' } : d)),
+          .filter(
+            (d) =>
+              d.status === 'completed' ||
+              d.status === 'failed' ||
+              d.status === 'paused'
+          )
+          .map((d) =>
+            d.status === 'downloading' || d.status === 'queued'
+              ? { ...d, status: 'paused' }
+              : d
+          ),
       }),
     }
   )
