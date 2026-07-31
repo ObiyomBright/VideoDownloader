@@ -97,7 +97,7 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     return None
 
 def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
-    """Configures yt-dlp with Snaptube-grade bypass options."""
+    """Configures yt-dlp with Snaptube-grade bypass options without assertion errors."""
     base_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -106,20 +106,20 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
         
-        # Valid curl-cffi impersonate target specification
-        'impersonate': 'chrome-124',
+        # 'chrome' is the correct string expected by curl_cffi via yt-dlp
+        'impersonate': 'chrome',
         
-        # Updated YouTube & TikTok clients (removed deprecated 'mweb')
+        # Allow default player client selection fallback to avoid internal assertion failures
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android', 'tv'],
+                'player_client': ['ios', 'android', 'web'],
             },
             'tiktok': {
                 'app_version': '30.0.0',
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
