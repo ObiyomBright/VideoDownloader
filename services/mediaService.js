@@ -11,9 +11,9 @@ const extractCleanUrl = (text) => {
   if (!text || typeof text !== 'string') return '';
   const match = text.match(/https?:\/\/[^\s]+/);
   return match ? match[0] : text.trim();
-};
+}; 
 
-// Helper to format bytes into readable string (e.g. 14.5 MB)
+// Helper to format bytes into readable string (e.g. 14.5 MB))
 const formatBytes = (bytes) => {
   if (!bytes || isNaN(bytes) || bytes === 0) return null;
   const k = 1024;
