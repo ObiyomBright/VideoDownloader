@@ -1,9 +1,10 @@
 import { Alert } from 'react-native';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 import { useDownloadStore } from '../stores/useDownloadStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 
+// const API_BASE_URL = 'https://videodownloader-api-ze27.onrender.com';
 const API_BASE_URL = 'http://10.0.2.2:8000';
 
 const extractCleanUrl = (text) => {
@@ -161,12 +162,13 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
 
   // 1. Progress callback driving the Zustand store updates
   const callback = (downloadProgress) => {
-    const progress =
-      downloadProgress.totalBytesWritten /
-      downloadProgress.totalBytesExpectedToWrite;
+    const totalExpected = downloadProgress.totalBytesExpectedToWrite;
+    if (totalExpected > 0) {
+      const progress = downloadProgress.totalBytesWritten / totalExpected;
 
-    if (!isNaN(progress) && progress >= 0) {
-      updateProgress(downloadId, progress, 'downloading');
+      if (!isNaN(progress) && progress >= 0) {
+        updateProgress(downloadId, progress, 'downloading');
+      }
     }
   };
 
@@ -204,6 +206,9 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
       parsedDetail = jsonErr.detail;
     } catch (e) {}
 
+    // Clean up temporary failed download file to keep storage clean
+    await FileSystem.deleteAsync(result.uri, { idempotent: true });
+
     const errorMsg = parsedDetail || 'Error completing download processing.';
     if (notify) notify(errorMsg, 'error');
     throw new Error(errorMsg);
@@ -217,9 +222,6 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
   try {
     if (downloadUri && FileSystem.StorageAccessFramework) {
       const mimeType = isAudio ? 'audio/mpeg' : 'video/mp4';
-      const fileData = await FileSystem.readAsStringAsync(result.uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
 
       const safariTargetUri = await FileSystem.StorageAccessFramework.createFileAsync(
         downloadUri,
@@ -227,11 +229,11 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
         mimeType
       );
 
-      await FileSystem.StorageAccessFramework.writeAsStringAsync(
-        safariTargetUri,
-        fileData,
-        { encoding: FileSystem.EncodingType.Base64 }
-      );
+      // Perform a native stream copy to prevent JS heap Out Of Memory crashes on large video files
+      await FileSystem.copyAsync({
+        from: result.uri,
+        to: safariTargetUri,
+      });
 
       finalUri = safariTargetUri;
     } else {
@@ -247,6 +249,11 @@ const downloadToDevice = async (downloadUrl, fileName, title, notify, downloadId
         }
       }
     }
+
+    // Clean up internal sandbox cache file if target was copied to SAF/MediaLibrary
+    if (finalUri !== result.uri) {
+      await FileSystem.deleteAsync(result.uri, { idempotent: true });
+    }
   } catch (mediaError) {
     console.warn('Storage save warning:', mediaError);
   }
@@ -261,10 +268,11 @@ export const startOrResumeDownload = async (item) => {
   const fileUri = `${FileSystem.documentDirectory}${Date.now()}_${item.id}.mp4`;
 
   const callback = (downloadProgress) => {
-    const progress =
-      downloadProgress.totalBytesWritten /
-      downloadProgress.totalBytesExpectedToWrite;
-    store.updateProgress(item.id, progress, 'downloading');
+    const totalExpected = downloadProgress.totalBytesExpectedToWrite;
+    if (totalExpected > 0) {
+      const progress = downloadProgress.totalBytesWritten / totalExpected;
+      store.updateProgress(item.id, progress, 'downloading');
+    }
   };
 
   let downloadResumable;
