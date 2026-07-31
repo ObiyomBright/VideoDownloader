@@ -46,20 +46,12 @@ def update_ytdlp_engine():
     """Forces engine update and clears cache when extraction/download breaks."""
     logger.info("🔄 Triggering on-demand engine update and cache cleanup...")
     try:
-        # 1. Upgrade yt-dlp and curl-cffi to latest release
-        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--pre", "yt-dlp[default,curl-cffi]"]
-        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if process.returncode == 0:
-            logger.info("✅ yt-dlp auto-update completed successfully.")
-        else:
-            logger.error(f"⚠️ Update issue: {process.stderr}")
-
-        # 2. Clear yt-dlp cache directory to discard stale extraction tokens
+        # 1. Clear yt-dlp cache directory to discard stale extraction tokens
         cache_cmd = [sys.executable, "-m", "yt_dlp", "--rm-cache-dir"]
         subprocess.run(cache_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         logger.info("🧹 Engine cache cleared.")
     except Exception as e:
-        logger.error(f"❌ Failed to run auto-update: {str(e)}")
+        logger.error(f"❌ Failed to clear cache: {str(e)}")
 
 # Optional background safety net (runs once every 24 hours during quiet periods)
 scheduler = BackgroundScheduler()
@@ -105,7 +97,7 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     return None
 
 def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
-    """Configures yt-dlp with Snaptube-grade bypass options using mweb, ios, tv_embedded and curl-cffi impersonation."""
+    """Configures yt-dlp with Snaptube-grade bypass options."""
     base_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -113,13 +105,14 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
         'geo_bypass': True,
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
-        'impersonate': 'chrome',  # Uses curl-cffi TLS impersonation to bypass Cloudflare/Bot guards
         
-        # Snaptube-grade bypass: mobile, iOS and TV clients bypass datacenter IP restrictions & cookie walls
+        # Valid curl-cffi impersonate target specification
+        'impersonate': 'chrome-124',
+        
+        # Updated YouTube & TikTok clients (removed deprecated 'mweb')
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'tv_embedded', 'mweb', 'android_vr'],
-                'player_skip': ['web', 'web_embedded'],
+                'player_client': ['ios', 'android', 'tv'],
             },
             'tiktok': {
                 'app_version': '30.0.0',
@@ -159,10 +152,8 @@ def _sync_extract_info(url: str, opts: dict):
         with yt_dlp.YoutubeDL(opts) as ytdl:
             return ytdl.extract_info(url, download=False)
     except (DownloadError, Exception) as first_err:
-        logger.warning(f"⚠️ Extraction failed for {url}. Attempting auto-update and retry... Error: {first_err}")
-        # Perform lazy update + clear cache
+        logger.warning(f"⚠️ Extraction failed for {url}. Attempting cache cleanup and retry... Error: {first_err}")
         update_ytdlp_engine()
-        # Retry extraction with updated engine
         with yt_dlp.YoutubeDL(opts) as ytdl:
             return ytdl.extract_info(url, download=False)
 
@@ -172,10 +163,8 @@ def _sync_download_media(url: str, opts: dict):
             info = ytdl.extract_info(url, download=True)
             return ytdl.prepare_filename(info)
     except (DownloadError, Exception) as first_err:
-        logger.warning(f"⚠️ Download failed for {url}. Attempting auto-update and retry... Error: {first_err}")
-        # Perform lazy update + clear cache
+        logger.warning(f"⚠️ Download failed for {url}. Attempting cache cleanup and retry... Error: {first_err}")
         update_ytdlp_engine()
-        # Retry download with updated engine
         with yt_dlp.YoutubeDL(opts) as ytdl:
             info = ytdl.extract_info(url, download=True)
             return ytdl.prepare_filename(info)
@@ -189,7 +178,6 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
     opts = build_ytdlp_options(url, {'skip_download': True})
 
     try:
-        # Non-blocking execution in thread pool with failure fallback
         info = await asyncio.to_thread(_sync_extract_info, url, opts)
 
         formats = []
@@ -218,8 +206,9 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
         })
 
     except Exception as e:
-        logger.error(f"Extraction error on {url}: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Failed to parse media link: {str(e)}")
+        err_msg = str(e).strip() or repr(e) or "Unknown extraction failure"
+        logger.error(f"Extraction error on {url}: {err_msg}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse media link: {err_msg}")
 
 
 @app.get("/api/v1/download")
@@ -249,7 +238,6 @@ async def download_media(
     })
 
     try:
-        # Non-blocking execution in thread pool with failure fallback
         raw_filename = await asyncio.to_thread(_sync_download_media, url, opts)
 
         base_path = os.path.splitext(raw_filename)[0]
@@ -270,8 +258,9 @@ async def download_media(
         )
 
     except Exception as e:
-        logger.error(f"Download processing error: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Download execution failed: {str(e)}")
+        err_msg = str(e).strip() or repr(e) or "Unknown download failure"
+        logger.error(f"Download processing error: {err_msg}")
+        raise HTTPException(status_code=400, detail=f"Download execution failed: {err_msg}")
 
 
 if __name__ == "__main__":

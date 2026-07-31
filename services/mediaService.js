@@ -31,9 +31,19 @@ export const fetchMediaInfo = async (inputUrl) => {
   );
 
   if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    const message = errData.detail || `Server error (${response.status})`;
-    throw new Error(message);
+    let errorMessage = `Server error (${response.status})`;
+    try {
+      const text = await response.text();
+      const errData = JSON.parse(text);
+      if (errData && errData.detail) {
+        errorMessage = errData.detail;
+      } else if (text) {
+        errorMessage = text.substring(0, 150); // Fallback to raw text preview if not JSON
+      }
+    } catch (_) {
+      // Keep default status string if parsing fails completely
+    }
+    throw new Error(errorMessage);
   }
 
   const data = await response.json();
@@ -100,7 +110,6 @@ export const fetchMediaInfo = async (inputUrl) => {
     available_qualities: formattedQualities,
   };
 };
-
 export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') => {
   const platformUrl = extractCleanUrl(
     payload.original_platform_url || payload.url || fallbackUrl
