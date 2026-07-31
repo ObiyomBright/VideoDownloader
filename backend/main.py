@@ -17,7 +17,7 @@ from yt_dlp.utils import DownloadError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DownloaderEngine")
 
-app = FastAPI(title="SnapTube-Grade Engine API", version="3.3.0")
+app = FastAPI(title="SnapTube-Grade Engine API", version="3.4.0")
 
 # ----------------------------------------------------------------------
 # DIRECTORY & CONFIGURATION
@@ -32,7 +32,7 @@ PROXIES: List[str] = []
 proxy_index = 0
 
 # ----------------------------------------------------------------------
-# 1. LIGHTWEIGHT HEALTH CHECK (KEEP-ALIVE ROUTE)
+# 1. LIGHTWEIGHT HEALTH CHECK
 # ----------------------------------------------------------------------
 @app.get("/healthz")
 async def health_check():
@@ -52,7 +52,6 @@ def update_ytdlp_engine():
     except Exception as e:
         logger.error(f"❌ Failed to clear cache: {str(e)}")
 
-# Background safety net (runs once every 24 hours)
 scheduler = BackgroundScheduler()
 scheduler.add_job(update_ytdlp_engine, 'interval', hours=24)
 
@@ -96,7 +95,7 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     return None
 
 def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
-    """Configures production-grade yt-dlp extraction settings without internal assertion conflicts."""
+    """Datacenter-proof YouTube extraction parameters."""
     base_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -105,8 +104,15 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
         'check_formats': False,
+        # Force mobile/embedded player clients to bypass YouTube Datacenter bot detection
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'mweb'],
+                'skip': ['hls', 'dash']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
@@ -125,12 +131,20 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
     return base_opts
 
 def build_fallback_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
-    """Clean fallback options stripped down to standard extraction parameters."""
+    """Fallback options targeting TV / iOS embedded endpoints when primary blocks hit."""
     fallback_opts = {
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
         'geo_bypass': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv', 'creator'],
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (AppleTV; Remote; CPU OS 13_0 like Mac OS X) AppleWebKit/605.1.15',
+        }
     }
 
     cookie_file = get_cookie_file_for_url(url)
@@ -150,14 +164,14 @@ def remove_temp_file(filepath: str):
         logger.error(f"Failed to cleanup temp file {filepath}: {e}")
 
 # ----------------------------------------------------------------------
-# SYNCHRONOUS WORKER WRAPPERS WITH TWO-TIER RETRY LOGIC
+# SYNCHRONOUS WORKER WRAPPERS WITH DATACENTER RETRY LOGIC
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str, opts: dict):
     try:
         with yt_dlp.YoutubeDL(opts) as ytdl:
             return ytdl.extract_info(url, download=False)
     except Exception as first_err:
-        logger.warning(f"⚠️ Primary extraction failed for {url}. Switching to fallback engine... Error: {first_err}")
+        logger.warning(f"⚠️ Primary extraction blocked on datacenter for {url}. Switching to TV/Embedded player fallback... Error: {first_err}")
         update_ytdlp_engine()
         fallback_opts = build_fallback_ytdlp_options(url, {'skip_download': True})
         with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
@@ -169,7 +183,7 @@ def _sync_download_media(url: str, opts: dict, raw_custom_opts: dict):
             info = ytdl.extract_info(url, download=True)
             return ytdl.prepare_filename(info)
     except Exception as first_err:
-        logger.warning(f"⚠️ Primary download failed for {url}. Switching to fallback engine... Error: {first_err}")
+        logger.warning(f"⚠️ Primary download blocked on datacenter for {url}. Switching to fallback engine... Error: {first_err}")
         update_ytdlp_engine()
         fallback_opts = build_fallback_ytdlp_options(url, raw_custom_opts)
         with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
