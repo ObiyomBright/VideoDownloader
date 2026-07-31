@@ -20,17 +20,25 @@ const RootLayout = () => {
         if (Platform.OS === 'android') {
             const syncNativeTheme = async () => {
                 try {
-                    // 1. Change the underlying native window background (eliminates the default white root)
-                    await SystemUI.setBackgroundColorAsync(theme.background);
+                    // 1. Change underlying native window background
+                    if (SystemUI?.setBackgroundColorAsync) {
+                        await SystemUI.setBackgroundColorAsync(theme.background);
+                    }
 
-                    // 2. Disable Android's forced white contrast scrim
-                    await NavigationBar.setEnforceContrastAsync(false);
+                    // 2. Safe-check enforce contrast (removed direct hard call to avoid undefined function crash)
+                    if (typeof NavigationBar?.setEnforceContrastAsync === 'function') {
+                        await NavigationBar.setEnforceContrastAsync(false);
+                    }
 
-                    // 3. Set navigation bar background color to match current theme
-                    await NavigationBar.setBackgroundColorAsync(theme.background);
+                    // 3. Set navigation bar background color
+                    if (NavigationBar?.setBackgroundColorAsync) {
+                        await NavigationBar.setBackgroundColorAsync(theme.background);
+                    }
 
-                    // 4. Update button icon contrast (light icons for dark mode, dark icons for light mode)
-                    await NavigationBar.setButtonStyleAsync(isDark ? "light" : "dark");
+                    // 4. Update button icon contrast
+                    if (NavigationBar?.setButtonStyleAsync) {
+                        await NavigationBar.setButtonStyleAsync(isDark ? "light" : "dark");
+                    }
                 } catch (error) {
                     console.error("Error setting navigation bar style:", error);
                 }

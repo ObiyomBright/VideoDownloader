@@ -16,10 +16,10 @@ import yt_dlp
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DownloaderEngine")
 
-app = FastAPI(title="SnapTube-Grade Engine API", version="3.0.0")
+app = FastAPI(title="SnapTube-Grade Engine API", version="3.1.0")
 
 # ----------------------------------------------------------------------
-# DIRECTORY & PROXY INLINE CONFIGURATION
+# DIRECTORY & PROXY CONFIGURATION
 # ----------------------------------------------------------------------
 TEMP_DOWNLOAD_DIR = "/tmp/downloads"
 COOKIES_DIR = "./cookies"
@@ -27,16 +27,14 @@ COOKIES_DIR = "./cookies"
 os.makedirs(TEMP_DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(COOKIES_DIR, exist_ok=True)
 
-# Add your rotating proxy URLs directly into this list if using paid proxy providers
-# Example format: ["http://user:pass@proxy1.com:8080", "http://user:pass@proxy2.com:8080"]
 PROXIES: List[str] = []
 proxy_index = 0
 
 # ----------------------------------------------------------------------
-# 1. AUTOMATIC BACKGROUND AUTO-UPDATER (Runs Every 6 Hours)
+# 1. ENGINE AUTO-UPDATER & CRON WEBHOOK HOOK
 # ----------------------------------------------------------------------
 def update_ytdlp_engine():
-    """Runs in background to ensure yt-dlp stays ahead of site changes."""
+    """Updates yt-dlp and curl-cffi dependencies to the latest release to prevent bot blocks."""
     logger.info("🔄 Checking and updating yt-dlp engine to latest release...")
     try:
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp[default,curl-cffi]"]
@@ -48,26 +46,28 @@ def update_ytdlp_engine():
     except Exception as e:
         logger.error(f"❌ Failed to run auto-update: {str(e)}")
 
-# Initialize APScheduler
 scheduler = BackgroundScheduler()
 scheduler.add_job(update_ytdlp_engine, 'interval', hours=6)
 
 @app.on_event("startup")
 def startup_event():
-    # Execute update on app launch
     update_ytdlp_engine()
-    # Start scheduler background thread
     scheduler.start()
 
 @app.on_event("shutdown")
 def shutdown_event():
     scheduler.shutdown()
 
+@app.get("/api/v1/update-engine")
+def trigger_cron_update():
+    """Dedicated webhook endpoint for your Render cron job to force engine updates on schedule."""
+    update_ytdlp_engine()
+    return {"status": "success", "message": "Engine update triggered successfully."}
+
 # ----------------------------------------------------------------------
-# 2. INLINE HELPERS: PROXY ROTATION & COOKIES
+# 2. PROXY ROTATION & COOKIES HELPERS
 # ----------------------------------------------------------------------
 def get_next_proxy() -> Optional[str]:
-    """Rotates through list of available proxies on each download request."""
     global proxy_index
     if not PROXIES:
         return None
@@ -76,7 +76,6 @@ def get_next_proxy() -> Optional[str]:
     return selected_proxy
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
-    """Dynamically resolves domain-specific cookie files in ./cookies folder."""
     if "youtube.com" in url or "youtu.be" in url:
         cookie_path = os.path.join(COOKIES_DIR, "youtube.txt")
     elif "instagram.com" in url:
@@ -91,7 +90,7 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     return None
 
 def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
-    """Configures yt-dlp with client fallback strategies, cookies, and proxies."""
+    """Configures yt-dlp with Snaptube-grade bypass options using mweb, android clients and curl-cffi."""
     base_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -100,24 +99,23 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
         
-        # Youtube Client fallbacks to bypass bot blocks
+        # Snaptube-grade bypass: use mobile web and android clients to avoid web bot challenges
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web'],
+                'player_client': ['mweb', 'android', 'ios', 'tv_embedded'],
+                'player_skip': ['web', 'web_embedded'],
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
 
-    # Attach proxy if defined
     proxy = get_next_proxy()
     if proxy:
         base_opts['proxy'] = proxy
 
-    # Inject domain cookies if available
     cookie_file = get_cookie_file_for_url(url)
     if cookie_file:
         base_opts['cookiefile'] = cookie_file
@@ -128,7 +126,6 @@ def build_ytdlp_options(url: str, custom_opts: dict = None) -> dict:
     return base_opts
 
 def remove_temp_file(filepath: str):
-    """Deletes temporary files after the client finishes downloading."""
     try:
         if os.path.exists(filepath):
             os.remove(filepath)
@@ -141,7 +138,6 @@ def remove_temp_file(filepath: str):
 
 @app.get("/api/v1/extract/url")
 async def extract_info(url: str = Query(..., description="Media platform URL")):
-    """Extracts platform metadata, available resolutions, and direct stream links."""
     opts = build_ytdlp_options(url, {'skip_download': True})
 
     try:
@@ -183,7 +179,6 @@ async def download_media(
     quality: str = Query("best"),
     audio_only: bool = Query(False)
 ):
-    """Downloads media, processes formats via FFmpeg, and streams MP4/MP3 to client."""
     output_template = os.path.join(TEMP_DOWNLOAD_DIR, '%(id)s_%(title).30s.%(ext)s')
 
     if audio_only:
@@ -217,7 +212,6 @@ async def download_media(
                 else:
                     raise FileNotFoundError("Processed output file missing on server.")
 
-        # Clean up temporary file after response streaming completes
         background_tasks.add_task(remove_temp_file, final_filename)
 
         return FileResponse(
