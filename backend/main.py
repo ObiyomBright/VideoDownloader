@@ -15,17 +15,27 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import yt_dlp
+import imageio_ffmpeg
 
 # ----------------------------------------------------------------------
-# 1. LOGGING & ENVIRONMENT SETUP
+# 0. AUTOMATIC FFMPEG BINDING
 # ----------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DownloaderEngine")
 
-# Detect environment
+try:
+    ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_dir = os.path.dirname(ffmpeg_executable)
+    os.environ["PATH"] = ffmpeg_dir + os.path.pathsep + os.environ.get("PATH", "")
+    logger.info(f"✅ FFmpeg path configured automatically via imageio-ffmpeg: {ffmpeg_executable}")
+except Exception as ffmpeg_err:
+    logger.warning(f"⚠️ Could not automatically expose FFmpeg via imageio-ffmpeg: {ffmpeg_err}")
+
+# ----------------------------------------------------------------------
+# 1. LOGGING & ENVIRONMENT SETUP
+# ----------------------------------------------------------------------
 IS_RENDER = os.getenv("RENDER", "false").lower() == "true" or "RENDER" in os.environ
 
-# Base Directories
 BASE_DIR = Path(__file__).resolve().parent
 TEMP_DOWNLOAD_DIR = "/tmp/downloads"
 COOKIES_DIR = str(BASE_DIR / "cookies")
@@ -70,7 +80,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable CORS for frontend clients
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -83,10 +92,6 @@ app.add_middleware(
 # 3. HELPER FUNCTIONS & COOKIE SANITIZATION
 # ----------------------------------------------------------------------
 def sanitize_and_write_cookies(src_path: str, dst_path: str) -> bool:
-    """
-    Sanitizes Netscape format cookie files by removing invalid empty lines, 
-    extra trailing whitespace, and verifying 7-column structures.
-    """
     try:
         with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
@@ -117,10 +122,6 @@ def sanitize_and_write_cookies(src_path: str, dst_path: str) -> bool:
         return False
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
-    """
-    Sanitizes and copies Render Secret Files, local cookie files, or raw Env vars
-    to writable /tmp/downloads/cookies/
-    """
     if "youtube.com" in url or "youtu.be" in url:
         filename = "youtube.txt"
     elif "instagram.com" in url:
@@ -132,7 +133,6 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
     writable_path = os.path.join(WRITABLE_COOKIES_DIR, filename)
 
-    # 1. Check for raw content in Environment Variables
     cookie_env = os.getenv("YOUTUBE_COOKIES_TEXT") or os.getenv("RENDER_SECRET_COOKIE")
     if cookie_env and ("youtube" in filename or "cookies" in filename):
         try:
@@ -143,14 +143,12 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
         except Exception as e:
             logger.error(f"Failed writing cookie environment variable: {e}")
 
-    # 2. Check Render Secret mounts (/etc/secrets)
     render_secret_path = os.path.join(RENDER_SECRETS_DIR, filename)
     if os.path.exists(render_secret_path) and os.path.getsize(render_secret_path) > 0:
         if sanitize_and_write_cookies(render_secret_path, writable_path):
             logger.info(f"🔑 Cleaned & Copied Render Secret Cookie to: {writable_path}")
             return writable_path
 
-    # 3. Check Local Cookie folder or root directory
     local_cookie_path = os.path.join(COOKIES_DIR, filename)
     root_cookie_path = str(BASE_DIR / "cookies.txt")
 
@@ -186,7 +184,8 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
         'geo_bypass': True,
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
-        'hls_use_mpegts': True,  # Prevents HLS .part-Frag renaming race conditions
+        'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(),
+        'hls_use_mpegts': True,
         'format': 'all',
         'extractor_args': {
             'youtube': {
@@ -255,7 +254,6 @@ def _sync_download_media(url: str, custom_download_opts: dict):
 @app.get("/")
 @app.head("/")
 async def root():
-    """Root endpoint to handle automated cloud provider GET and HEAD health checks."""
     return {
         "status": "online", 
         "message": "Video Downloader Engine API is running.",
@@ -265,12 +263,10 @@ async def root():
 @app.get("/healthz")
 @app.head("/healthz")
 async def health_check():
-    """Ultra-lightweight ping endpoint to keep Render active."""
     return {"status": "ok", "engine": "active"}
 
 @app.get("/api/v1/update-engine")
 async def trigger_cron_update():
-    """Dedicated webhook endpoint to manually force engine updates on command."""
     await asyncio.to_thread(update_ytdlp_engine)
     return {"status": "success", "message": "Engine update triggered successfully."}
 
@@ -329,7 +325,6 @@ async def download_media(
     quality: str = Query("best"),
     audio_only: bool = Query(False)
 ):
-    # Isolate each download task into a unique temporary directory to avoid concurrent file collisions
     task_id = str(uuid.uuid4())
     task_dir = os.path.join(TEMP_DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
@@ -344,10 +339,11 @@ async def download_media(
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
         
         if target_height:
-            # Flexible format fallback string to prevent "Requested format is not available" errors
             format_selector = (
-                f'bv*[height<={target_height}]+ba/b[height<={target_height}]/'
-                f'bv*[height<={target_height}]/b[height<={target_height}]/best'
+                f'bv*[height<={target_height}]+ba/'
+                f'b[height<={target_height}]/'
+                f'bv*[height<={target_height}]/'
+                f'bv*+ba/b/best'
             )
         else:
             format_selector = 'bv*+ba/b/best'
@@ -391,7 +387,6 @@ async def download_media(
                 else:
                     raise FileNotFoundError("Processed output file missing on server.")
 
-        # Clean up the task isolation directory after the client receives the file response
         background_tasks.add_task(remove_temp_directory, task_dir)
 
         return FileResponse(
