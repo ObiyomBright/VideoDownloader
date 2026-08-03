@@ -10,7 +10,6 @@ from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from apscheduler.schedulers.background import BackgroundScheduler
 import yt_dlp
-from yt_dlp.utils import DownloadError
 
 # ----------------------------------------------------------------------
 # LOGGING SETUP
@@ -90,9 +89,8 @@ def get_next_proxy() -> Optional[str]:
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
     """
-    Checks for Render Secret Files (/etc/secrets/), copies them to a writable
-    location (/tmp/downloads/cookies/), and returns the writable file path.
-    Prevents yt-dlp [Errno 30] Read-only file system crashes on Render.
+    Copies Render Secret Files (/etc/secrets/) to writable /tmp/downloads/cookies/
+    to prevent yt-dlp [Errno 30] Read-only file system crashes on Render.
     """
     if "youtube.com" in url or "youtu.be" in url:
         filename = "youtube.txt"
@@ -107,7 +105,6 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     local_cookie_path = os.path.join(COOKIES_DIR, filename)
     writable_path = os.path.join(WRITABLE_COOKIES_DIR, filename)
 
-    # 1. If Render Secret File exists, sync/copy it to the writable directory
     if os.path.exists(render_secret_path) and os.path.getsize(render_secret_path) > 0:
         try:
             shutil.copyfile(render_secret_path, writable_path)
@@ -116,7 +113,6 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
         except Exception as e:
             logger.error(f"❌ Failed to copy secret cookie file: {e}")
 
-    # 2. Fall back to local ./cookies/ directory if present
     if os.path.exists(local_cookie_path) and os.path.getsize(local_cookie_path) > 0:
         try:
             shutil.copyfile(local_cookie_path, writable_path)
@@ -130,13 +126,12 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str = "primary") -> dict:
     """
     Datacenter-proof YouTube extraction parameters.
-    Tier 1 uses 'android_vr' and 'tv_embedded' which do NOT enforce BotGuard/PO Tokens.
-    Tier 2 falls back to 'web_creator' and 'mweb' if primary endpoints fail.
+    Allows HLS and DASH stream manifests so yt-dlp can locate formats.
     """
     if tier == "fallback":
-        player_clients = ['tv_embedded', 'web_creator', 'mweb']
+        player_clients = ['ios', 'mweb', 'web_creator', 'tv_embedded']
     else:
-        player_clients = ['android_vr', 'tv', 'ios', 'mweb']
+        player_clients = ['android', 'ios', 'mweb', 'web']
 
     base_opts: Dict[str, Any] = {
         'quiet': True,
@@ -145,16 +140,13 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
         'geo_bypass': True,
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
-        'check_formats': False,
-        'source_address': '0.0.0.0',  # Force IPv4 binding to prevent datacenter IPv6 blocks
         'extractor_args': {
             'youtube': {
                 'player_client': player_clients,
-                'skip': ['hls', 'dash']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Android 14; Mobile; rv:124.0) Gecko/124.0 Firefox/124.0',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
@@ -181,7 +173,7 @@ def remove_temp_file(filepath: str):
         logger.error(f"Failed to cleanup temp file {filepath}: {e}")
 
 # ----------------------------------------------------------------------
-# SYNCHRONOUS WORKER WRAPPERS WITH DATACENTER RETRY LOGIC
+# SYNCHRONOUS WORKER WRAPPERS WITH RETRY LOGIC
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
     primary_opts = build_ytdlp_options(url, {'skip_download': True}, tier="primary")
@@ -189,7 +181,7 @@ def _sync_extract_info(url: str):
         with yt_dlp.YoutubeDL(primary_opts) as ytdl:
             return ytdl.extract_info(url, download=False)
     except Exception as first_err:
-        logger.warning(f"⚠️ Primary client extraction blocked on datacenter for {url}. Attempting fallback client chain... Error: {first_err}")
+        logger.warning(f"⚠️ Primary client extraction failed for {url}. Attempting fallback client chain... Error: {first_err}")
         update_ytdlp_engine()
         fallback_opts = build_ytdlp_options(url, {'skip_download': True}, tier="fallback")
         with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
@@ -202,7 +194,7 @@ def _sync_download_media(url: str, custom_download_opts: dict):
             info = ytdl.extract_info(url, download=True)
             return ytdl.prepare_filename(info)
     except Exception as first_err:
-        logger.warning(f"⚠️ Primary download blocked on datacenter for {url}. Switching to fallback engine... Error: {first_err}")
+        logger.warning(f"⚠️ Primary download failed for {url}. Switching to fallback engine... Error: {first_err}")
         update_ytdlp_engine()
         fallback_opts = build_ytdlp_options(url, custom_download_opts, tier="fallback")
         with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
@@ -223,7 +215,11 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
             for f in info['formats']:
                 if f.get('vcodec') != 'none' or f.get('acodec') != 'none':
                     filesize = f.get('filesize') or f.get('filesize_approx')
-                    quality_label = f.get('format_note') or f.get('resolution') or (f"{f.get('height')}p" if f.get('height') else f.get('height'))
+                    quality_label = (
+                        f.get('format_note') or
+                        f.get('resolution') or
+                        (f"{f.get('height')}p" if f.get('height') else "Audio/Video")
+                    )
                     formats.append({
                         'format_id': f.get('format_id'),
                         'quality': quality_label,
@@ -240,7 +236,7 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
             "uploader": info.get('uploader') or info.get('extractor_key'),
             "platform": info.get('extractor_key'),
             "original_platform_url": url,
-            "available_qualities": formats[-10:],
+            "available_qualities": formats[-15:] if formats else [],
             "direct_url": info.get('url'),
         })
 
