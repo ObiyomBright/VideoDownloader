@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SnapTube-Grade Engine API", 
-    version="3.6.1", 
+    version="3.7.0", 
     lifespan=lifespan
 )
 
@@ -171,11 +171,11 @@ def get_next_proxy() -> Optional[str]:
     proxy_index += 1
     return selected_proxy
 
-def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str = "primary") -> dict:
+def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str = "primary", ignore_cookies: bool = False) -> dict:
     if tier == "fallback":
-        player_clients = ['ios', 'mweb', 'tv_embedded', 'android']
+        player_clients = ['tv_embedded', 'mweb', 'ios', 'android']
     else:
-        player_clients = ['ios', 'android', 'mweb', 'web']
+        player_clients = ['mweb', 'ios', 'android', 'tv']
 
     base_opts: Dict[str, Any] = {
         'quiet': True,
@@ -186,13 +186,14 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
         'prefer_ffmpeg': True,
         'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(),
         'hls_use_mpegts': True,
+        'youtube_include_dash_manifest': False,
         'extractor_args': {
             'youtube': {
                 'player_client': player_clients,
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
@@ -201,9 +202,10 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
     if proxy:
         base_opts['proxy'] = proxy
 
-    cookie_file = get_cookie_file_for_url(url)
-    if cookie_file:
-        base_opts['cookiefile'] = cookie_file
+    if not ignore_cookies:
+        cookie_file = get_cookie_file_for_url(url)
+        if cookie_file:
+            base_opts['cookiefile'] = cookie_file
 
     if custom_opts:
         base_opts.update(custom_opts)
@@ -219,19 +221,30 @@ def remove_temp_directory(dirpath: str):
         logger.error(f"Failed to cleanup directory {dirpath}: {e}")
 
 # ----------------------------------------------------------------------
-# 4. SYNCHRONOUS WORKER WRAPPERS WITH RETRY LOGIC
+# 4. SYNCHRONOUS WORKER WRAPPERS WITH MULTI-TIER RETRY LOGIC
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
+    # Tier 1: Primary with cookies
     primary_opts = build_ytdlp_options(url, {'skip_download': True}, tier="primary")
     try:
         with yt_dlp.YoutubeDL(primary_opts) as ytdl:
             return ytdl.extract_info(url, download=False)
-    except Exception as first_err:
-        logger.warning(f"⚠️ Primary client extraction failed for {url}. Attempting fallback... Error: {first_err}")
-        update_ytdlp_engine()
-        fallback_opts = build_ytdlp_options(url, {'skip_download': True}, tier="fallback")
+    except Exception as err1:
+        logger.warning(f"⚠️ Primary client extraction failed for {url}: {err1}")
+
+    # Tier 2: Fallback clients with cookies
+    fallback_opts = build_ytdlp_options(url, {'skip_download': True}, tier="fallback")
+    try:
         with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
             return ytdl.extract_info(url, download=False)
+    except Exception as err2:
+        logger.warning(f"⚠️ Fallback extraction failed for {url}: {err2}")
+
+    # Tier 3: Anonymous extraction (without cookies, in case cookie is invalid/expired)
+    logger.info("⚠️ Attempting clean anonymous extraction without cookie file...")
+    anon_opts = build_ytdlp_options(url, {'skip_download': True}, tier="fallback", ignore_cookies=True)
+    with yt_dlp.YoutubeDL(anon_opts) as ytdl:
+        return ytdl.extract_info(url, download=False)
 
 def _sync_download_media(url: str, custom_download_opts: dict):
     primary_opts = build_ytdlp_options(url, custom_download_opts, tier="primary")
@@ -239,13 +252,21 @@ def _sync_download_media(url: str, custom_download_opts: dict):
         with yt_dlp.YoutubeDL(primary_opts) as ytdl:
             info = ytdl.extract_info(url, download=True)
             return ytdl.prepare_filename(info)
-    except Exception as first_err:
-        logger.warning(f"⚠️ Primary download failed for {url}. Switching to fallback engine... Error: {first_err}")
-        update_ytdlp_engine()
-        fallback_opts = build_ytdlp_options(url, custom_download_opts, tier="fallback")
+    except Exception as err1:
+        logger.warning(f"⚠️ Primary download failed for {url}: {err1}")
+        
+    fallback_opts = build_ytdlp_options(url, custom_download_opts, tier="fallback")
+    try:
         with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
             info = ytdl.extract_info(url, download=True)
             return ytdl.prepare_filename(info)
+    except Exception as err2:
+        logger.warning(f"⚠️ Fallback download failed for {url}: {err2}")
+
+    anon_opts = build_ytdlp_options(url, custom_download_opts, tier="fallback", ignore_cookies=True)
+    with yt_dlp.YoutubeDL(anon_opts) as ytdl:
+        info = ytdl.extract_info(url, download=True)
+        return ytdl.prepare_filename(info)
 
 # ----------------------------------------------------------------------
 # 5. ROOT & HEALTH CHECK ENDPOINTS
