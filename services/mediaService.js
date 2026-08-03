@@ -26,7 +26,7 @@ export const fetchMediaInfo = async (inputUrl) => {
   const cleanUrl = extractCleanUrl(inputUrl);
   if (!cleanUrl) throw new Error('Please enter a valid media URL.');
 
-  const response = await fetch(
+  const  response = await fetch(
     `${API_BASE_URL}/api/v1/extract/url?url=${encodeURIComponent(cleanUrl)}`
   );
 
