@@ -24,9 +24,11 @@ logger = logging.getLogger("DownloaderEngine")
 TEMP_DOWNLOAD_DIR = "/tmp/downloads"
 COOKIES_DIR = "./cookies"
 RENDER_SECRETS_DIR = "/etc/secrets"
+WRITABLE_COOKIES_DIR = "/tmp/downloads/cookies"
 
 os.makedirs(TEMP_DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(COOKIES_DIR, exist_ok=True)
+os.makedirs(WRITABLE_COOKIES_DIR, exist_ok=True)
 
 PROXIES: List[str] = []
 proxy_index = 0
@@ -88,8 +90,9 @@ def get_next_proxy() -> Optional[str]:
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
     """
-    Checks for secret files in Render's mount directory (/etc/secrets/) first.
-    Falls back to the local COOKIES_DIR if not running on Render or if not found.
+    Checks for Render Secret Files (/etc/secrets/), copies them to a writable
+    location (/tmp/downloads/cookies/), and returns the writable file path.
+    Prevents yt-dlp [Errno 30] Read-only file system crashes on Render.
     """
     if "youtube.com" in url or "youtu.be" in url:
         filename = "youtube.txt"
@@ -100,17 +103,27 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     else:
         filename = "cookies.txt"
 
-    # 1. Check Render Secret Files directory first (/etc/secrets/youtube.txt)
     render_secret_path = os.path.join(RENDER_SECRETS_DIR, filename)
-    if os.path.exists(render_secret_path) and os.path.getsize(render_secret_path) > 0:
-        logger.info(f"🔑 Using Render Secret Cookie File: {render_secret_path}")
-        return render_secret_path
-
-    # 2. Fall back to local ./cookies/ directory
     local_cookie_path = os.path.join(COOKIES_DIR, filename)
+    writable_path = os.path.join(WRITABLE_COOKIES_DIR, filename)
+
+    # 1. If Render Secret File exists, sync/copy it to the writable directory
+    if os.path.exists(render_secret_path) and os.path.getsize(render_secret_path) > 0:
+        try:
+            shutil.copyfile(render_secret_path, writable_path)
+            logger.info(f"🔑 Copied Render Secret Cookie to Writable Path: {writable_path}")
+            return writable_path
+        except Exception as e:
+            logger.error(f"❌ Failed to copy secret cookie file: {e}")
+
+    # 2. Fall back to local ./cookies/ directory if present
     if os.path.exists(local_cookie_path) and os.path.getsize(local_cookie_path) > 0:
-        logger.info(f"🔑 Using Local Cookie File: {local_cookie_path}")
-        return local_cookie_path
+        try:
+            shutil.copyfile(local_cookie_path, writable_path)
+            logger.info(f"🔑 Copied Local Cookie to Writable Path: {writable_path}")
+            return writable_path
+        except Exception as e:
+            logger.error(f"❌ Failed to copy local cookie file: {e}")
 
     return None
 
@@ -123,7 +136,6 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
     if tier == "fallback":
         player_clients = ['tv_embedded', 'web_creator', 'mweb']
     else:
-        # 'android_vr' and 'tv' bypass YouTube's datacenter BotGuard verification
         player_clients = ['android_vr', 'tv', 'ios', 'mweb']
 
     base_opts: Dict[str, Any] = {
