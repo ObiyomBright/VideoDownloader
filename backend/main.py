@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SnapTube-Grade Engine API", 
-    version="3.6.0", 
+    version="3.6.1", 
     lifespan=lifespan
 )
 
@@ -186,7 +186,6 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
         'prefer_ffmpeg': True,
         'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(),
         'hls_use_mpegts': True,
-        'format': 'all',
         'extractor_args': {
             'youtube': {
                 'player_client': player_clients,
@@ -332,7 +331,7 @@ async def download_media(
     output_template = os.path.join(task_dir, '%(id)s_%(title).30s.%(ext)s')
 
     if audio_only:
-        format_selector = 'ba/b'
+        format_selector = 'bestaudio/best'
         post_processors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
         ext = 'mp3'
     else:
@@ -340,13 +339,13 @@ async def download_media(
         
         if target_height:
             format_selector = (
-                f'bv*[height<={target_height}]+ba/'
-                f'b[height<={target_height}]/'
-                f'bv*[height<={target_height}]/'
-                f'bv*+ba/b/best'
+                f'bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/'
+                f'bestvideo[height<={target_height}]+bestaudio/'
+                f'best[height<={target_height}]/'
+                f'best'
             )
         else:
-            format_selector = 'bv*+ba/b/best'
+            format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
             
         post_processors = []
         ext = 'mp4'
@@ -365,7 +364,7 @@ async def download_media(
             if "Requested format is not available" in str(primary_err):
                 logger.warning(f"⚠️ Requested quality unavailable for {url}. Falling back to best stream...")
                 fallback_opts = dict(download_custom_opts)
-                fallback_opts['format'] = 'b/best'
+                fallback_opts['format'] = 'best'
                 raw_filename = await asyncio.to_thread(_sync_download_media, url, fallback_opts)
             else:
                 raise primary_err
