@@ -267,23 +267,17 @@ async def download_media(
     output_template = os.path.join(TEMP_DOWNLOAD_DIR, '%(id)s_%(title).30s.%(ext)s')
 
     if audio_only:
-        # Fallback chain for audio
-        format_selector = 'bestaudio/best'
+        format_selector = 'ba/b'
         post_processors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
         ext = 'mp3'
     else:
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
         
         if target_height:
-            # Multi-level fallback sequence: Requested height -> Any height video + audio -> Any stream -> Absolute best single format
-            format_selector = (
-                f'bestvideo[height<={target_height}]+bestaudio/'
-                f'bestvideo[height<={target_height}]+bestaudio/best/'
-                f'bestvideo+bestaudio/'
-                f'best/b'
-            )
+            # bv* allows fallback to combined video+audio formats if separate streams aren't served
+            format_selector = f'bv*[height<={target_height}]+ba/b[height<={target_height}]/bv*+ba/b'
         else:
-            format_selector = 'bestvideo+bestaudio/best/b'
+            format_selector = 'bv*+ba/b'
             
         post_processors = []
         ext = 'mp4'
@@ -296,7 +290,18 @@ async def download_media(
     }
 
     try:
-        raw_filename = await asyncio.to_thread(_sync_download_media, url, download_custom_opts)
+        # Attempt download with target quality selector
+        try:
+            raw_filename = await asyncio.to_thread(_sync_download_media, url, download_custom_opts)
+        except Exception as primary_err:
+            if "Requested format is not available" in str(primary_err):
+                logger.warning(f"⚠️ Resolution {quality} unavailable for {url}. Falling back to best available stream...")
+                # Fallback to any available working stream (highest to lowest)
+                fallback_opts = dict(download_custom_opts)
+                fallback_opts['format'] = 'b/best'
+                raw_filename = await asyncio.to_thread(_sync_download_media, url, fallback_opts)
+            else:
+                raise primary_err
 
         base_path = os.path.splitext(raw_filename)[0]
         final_filename = f"{base_path}.{ext}"
