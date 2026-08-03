@@ -63,13 +63,15 @@ app = FastAPI(title="SnapTube-Grade Engine API", version="3.6.0", lifespan=lifes
 # 1. ROOT & HEALTH CHECK ENDPOINTS
 # ----------------------------------------------------------------------
 @app.get("/")
+@app.head("/")
 async def root():
-    """Root endpoint to handle automated cloud provider platform pings."""
+    """Root endpoint to handle automated cloud provider GET and HEAD health checks."""
     return {"status": "online", "message": "Video Downloader Engine API is running."}
 
 @app.get("/healthz")
+@app.head("/healthz")
 async def health_check():
-    """Ultra-lightweight ping endpoint to keep Render from spinning down."""
+    """Ultra-lightweight ping endpoint to keep Render active."""
     return {"status": "ok", "engine": "active"}
 
 # ----------------------------------------------------------------------
@@ -144,7 +146,7 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
         'geo_bypass': True,
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
-        'format': 'all',  # Prevent "Requested format is not available" during info extraction
+        'format': 'all',  # Prevent format restriction during info extraction
         'extractor_args': {
             'youtube': {
                 'player_client': player_clients,
@@ -218,7 +220,6 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
         formats = []
         if 'formats' in info and isinstance(info['formats'], list):
             for f in info['formats']:
-                # Deduplicate and extract readable quality formats
                 vcodec = f.get('vcodec', 'none')
                 acodec = f.get('acodec', 'none')
                 if vcodec != 'none' or acodec != 'none':
@@ -266,12 +267,24 @@ async def download_media(
     output_template = os.path.join(TEMP_DOWNLOAD_DIR, '%(id)s_%(title).30s.%(ext)s')
 
     if audio_only:
+        # Fallback chain for audio
         format_selector = 'bestaudio/best'
         post_processors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
         ext = 'mp3'
     else:
-        target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else "1080"
-        format_selector = f'bestvideo[height<={target_height}]+bestaudio/bestvideo+bestaudio/best'
+        target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
+        
+        if target_height:
+            # Multi-level fallback sequence: Requested height -> Any height video + audio -> Any stream -> Absolute best single format
+            format_selector = (
+                f'bestvideo[height<={target_height}]+bestaudio/'
+                f'bestvideo[height<={target_height}]+bestaudio/best/'
+                f'bestvideo+bestaudio/'
+                f'best/b'
+            )
+        else:
+            format_selector = 'bestvideo+bestaudio/best/b'
+            
         post_processors = []
         ext = 'mp4'
 
@@ -292,7 +305,17 @@ async def download_media(
             if os.path.exists(raw_filename):
                 final_filename = raw_filename
             else:
-                raise FileNotFoundError("Processed output file missing on server.")
+                # Scan download directory if filename output template had substitutions
+                file_id = os.path.basename(raw_filename).split('_')[0]
+                matched_files = [
+                    os.path.join(TEMP_DOWNLOAD_DIR, f)
+                    for f in os.listdir(TEMP_DOWNLOAD_DIR)
+                    if file_id in f and not f.endswith('.part')
+                ]
+                if matched_files:
+                    final_filename = matched_files[0]
+                else:
+                    raise FileNotFoundError("Processed output file missing on server.")
 
         background_tasks.add_task(remove_temp_file, final_filename)
 
