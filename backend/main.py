@@ -23,6 +23,7 @@ logger = logging.getLogger("DownloaderEngine")
 # ----------------------------------------------------------------------
 TEMP_DOWNLOAD_DIR = "/tmp/downloads"
 COOKIES_DIR = "./cookies"
+RENDER_SECRETS_DIR = "/etc/secrets"
 
 os.makedirs(TEMP_DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(COOKIES_DIR, exist_ok=True)
@@ -86,17 +87,31 @@ def get_next_proxy() -> Optional[str]:
     return selected_proxy
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
+    """
+    Checks for secret files in Render's mount directory (/etc/secrets/) first.
+    Falls back to the local COOKIES_DIR if not running on Render or if not found.
+    """
     if "youtube.com" in url or "youtu.be" in url:
-        cookie_path = os.path.join(COOKIES_DIR, "youtube.txt")
+        filename = "youtube.txt"
     elif "instagram.com" in url:
-        cookie_path = os.path.join(COOKIES_DIR, "instagram.txt")
+        filename = "instagram.txt"
     elif "tiktok.com" in url:
-        cookie_path = os.path.join(COOKIES_DIR, "tiktok.txt")
+        filename = "tiktok.txt"
     else:
-        cookie_path = os.path.join(COOKIES_DIR, "cookies.txt")
+        filename = "cookies.txt"
 
-    if os.path.exists(cookie_path) and os.path.getsize(cookie_path) > 0:
-        return cookie_path
+    # 1. Check Render Secret Files directory first (/etc/secrets/youtube.txt)
+    render_secret_path = os.path.join(RENDER_SECRETS_DIR, filename)
+    if os.path.exists(render_secret_path) and os.path.getsize(render_secret_path) > 0:
+        logger.info(f"🔑 Using Render Secret Cookie File: {render_secret_path}")
+        return render_secret_path
+
+    # 2. Fall back to local ./cookies/ directory
+    local_cookie_path = os.path.join(COOKIES_DIR, filename)
+    if os.path.exists(local_cookie_path) and os.path.getsize(local_cookie_path) > 0:
+        logger.info(f"🔑 Using Local Cookie File: {local_cookie_path}")
+        return local_cookie_path
+
     return None
 
 def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str = "primary") -> dict:
