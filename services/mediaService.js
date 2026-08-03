@@ -4,8 +4,8 @@ import * as MediaLibrary from 'expo-media-library';
 import { useDownloadStore } from '../stores/useDownloadStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 
-const API_BASE_URL = 'https://videodownloader-api-ze27.onrender.com';
-// const API_BASE_URL = 'http://10.0.2.2:8000';
+// const API_BASE_URL = 'https://videodownloader-api-ze27.onrender.com';
+const API_BASE_URL = 'http://10.0.2.2:8000';
 
 const extractCleanUrl = (text) => {
   if (!text || typeof text !== 'string') return '';

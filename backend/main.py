@@ -4,25 +4,31 @@ import uuid
 import shutil
 import asyncio
 import logging
+import tempfile
 import subprocess
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
+
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import yt_dlp
 
 # ----------------------------------------------------------------------
-# LOGGING SETUP
+# 1. LOGGING & ENVIRONMENT SETUP
 # ----------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DownloaderEngine")
 
-# ----------------------------------------------------------------------
-# DIRECTORY & CONFIGURATION
-# ----------------------------------------------------------------------
+# Detect environment
+IS_RENDER = os.getenv("RENDER", "false").lower() == "true" or "RENDER" in os.environ
+
+# Base Directories
+BASE_DIR = Path(__file__).resolve().parent
 TEMP_DOWNLOAD_DIR = "/tmp/downloads"
-COOKIES_DIR = "./cookies"
+COOKIES_DIR = str(BASE_DIR / "cookies")
 RENDER_SECRETS_DIR = "/etc/secrets"
 WRITABLE_COOKIES_DIR = "/tmp/downloads/cookies"
 
@@ -34,7 +40,7 @@ PROXIES: List[str] = []
 proxy_index = 0
 
 # ----------------------------------------------------------------------
-# ENGINE MAINTENANCE & SCHEDULER
+# 2. ENGINE MAINTENANCE & SCHEDULER
 # ----------------------------------------------------------------------
 def update_ytdlp_engine():
     """Clears engine cache directory on failure to reset invalid playback session tokens."""
@@ -58,31 +64,20 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
     logger.info("🛑 App shutdown complete.")
 
-app = FastAPI(title="SnapTube-Grade Engine API", version="3.6.0", lifespan=lifespan)
+app = FastAPI(
+    title="SnapTube-Grade Engine API", 
+    version="3.6.0", 
+    lifespan=lifespan
+)
 
-# ----------------------------------------------------------------------
-# 1. ROOT & HEALTH CHECK ENDPOINTS
-# ----------------------------------------------------------------------
-@app.get("/")
-@app.head("/")
-async def root():
-    """Root endpoint to handle automated cloud provider GET and HEAD health checks."""
-    return {"status": "online", "message": "Video Downloader Engine API is running."}
-
-@app.get("/healthz")
-@app.head("/healthz")
-async def health_check():
-    """Ultra-lightweight ping endpoint to keep Render active."""
-    return {"status": "ok", "engine": "active"}
-
-# ----------------------------------------------------------------------
-# 2. ENGINE UPDATE WEBHOOK
-# ----------------------------------------------------------------------
-@app.get("/api/v1/update-engine")
-async def trigger_cron_update():
-    """Dedicated webhook endpoint to manually force engine updates on command."""
-    await asyncio.to_thread(update_ytdlp_engine)
-    return {"status": "success", "message": "Engine update triggered successfully."}
+# Enable CORS for frontend clients
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ----------------------------------------------------------------------
 # 3. HELPER FUNCTIONS & COOKIE SANITIZATION
@@ -123,7 +118,8 @@ def sanitize_and_write_cookies(src_path: str, dst_path: str) -> bool:
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
     """
-    Sanitizes and copies Render Secret Files or local cookie files to writable /tmp/downloads/cookies/
+    Sanitizes and copies Render Secret Files, local cookie files, or raw Env vars
+    to writable /tmp/downloads/cookies/
     """
     if "youtube.com" in url or "youtu.be" in url:
         filename = "youtube.txt"
@@ -134,18 +130,37 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     else:
         filename = "cookies.txt"
 
-    render_secret_path = os.path.join(RENDER_SECRETS_DIR, filename)
-    local_cookie_path = os.path.join(COOKIES_DIR, filename)
     writable_path = os.path.join(WRITABLE_COOKIES_DIR, filename)
 
+    # 1. Check for raw content in Environment Variables
+    cookie_env = os.getenv("YOUTUBE_COOKIES_TEXT") or os.getenv("RENDER_SECRET_COOKIE")
+    if cookie_env and ("youtube" in filename or "cookies" in filename):
+        try:
+            cleaned_content = cookie_env.replace("\\n", "\n")
+            with open(writable_path, "w", encoding="utf-8") as f:
+                f.write(cleaned_content)
+            return writable_path
+        except Exception as e:
+            logger.error(f"Failed writing cookie environment variable: {e}")
+
+    # 2. Check Render Secret mounts (/etc/secrets)
+    render_secret_path = os.path.join(RENDER_SECRETS_DIR, filename)
     if os.path.exists(render_secret_path) and os.path.getsize(render_secret_path) > 0:
         if sanitize_and_write_cookies(render_secret_path, writable_path):
             logger.info(f"🔑 Cleaned & Copied Render Secret Cookie to: {writable_path}")
             return writable_path
 
+    # 3. Check Local Cookie folder or root directory
+    local_cookie_path = os.path.join(COOKIES_DIR, filename)
+    root_cookie_path = str(BASE_DIR / "cookies.txt")
+
     if os.path.exists(local_cookie_path) and os.path.getsize(local_cookie_path) > 0:
         if sanitize_and_write_cookies(local_cookie_path, writable_path):
             logger.info(f"🔑 Cleaned & Copied Local Cookie to: {writable_path}")
+            return writable_path
+    elif os.path.exists(root_cookie_path) and os.path.getsize(root_cookie_path) > 0:
+        if sanitize_and_write_cookies(root_cookie_path, writable_path):
+            logger.info(f"🔑 Cleaned & Copied Root Cookie to: {writable_path}")
             return writable_path
 
     return None
@@ -206,7 +221,7 @@ def remove_temp_directory(dirpath: str):
         logger.error(f"Failed to cleanup directory {dirpath}: {e}")
 
 # ----------------------------------------------------------------------
-# SYNCHRONOUS WORKER WRAPPERS WITH RETRY LOGIC
+# 4. SYNCHRONOUS WORKER WRAPPERS WITH RETRY LOGIC
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
     primary_opts = build_ytdlp_options(url, {'skip_download': True}, tier="primary")
@@ -235,7 +250,32 @@ def _sync_download_media(url: str, custom_download_opts: dict):
             return ytdl.prepare_filename(info)
 
 # ----------------------------------------------------------------------
-# 4. API ENDPOINTS
+# 5. ROOT & HEALTH CHECK ENDPOINTS
+# ----------------------------------------------------------------------
+@app.get("/")
+@app.head("/")
+async def root():
+    """Root endpoint to handle automated cloud provider GET and HEAD health checks."""
+    return {
+        "status": "online", 
+        "message": "Video Downloader Engine API is running.",
+        "environment": "Render" if IS_RENDER else "Local"
+    }
+
+@app.get("/healthz")
+@app.head("/healthz")
+async def health_check():
+    """Ultra-lightweight ping endpoint to keep Render active."""
+    return {"status": "ok", "engine": "active"}
+
+@app.get("/api/v1/update-engine")
+async def trigger_cron_update():
+    """Dedicated webhook endpoint to manually force engine updates on command."""
+    await asyncio.to_thread(update_ytdlp_engine)
+    return {"status": "success", "message": "Engine update triggered successfully."}
+
+# ----------------------------------------------------------------------
+# 6. CORE EXTRACTION AND DOWNLOAD API ENDPOINTS
 # ----------------------------------------------------------------------
 @app.get("/api/v1/extract/url")
 async def extract_info(url: str = Query(..., description="Media platform URL")):
@@ -289,7 +329,7 @@ async def download_media(
     quality: str = Query("best"),
     audio_only: bool = Query(False)
 ):
-    # Isolate each download task into a unique temporary directory to avoid concurrent file collision
+    # Isolate each download task into a unique temporary directory to avoid concurrent file collisions
     task_id = str(uuid.uuid4())
     task_dir = os.path.join(TEMP_DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
@@ -304,7 +344,7 @@ async def download_media(
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
         
         if target_height:
-            # Fallback format string ensuring best video under or equal to requested height
+            # Flexible format fallback string to prevent "Requested format is not available" errors
             format_selector = (
                 f'bv*[height<={target_height}]+ba/b[height<={target_height}]/'
                 f'bv*[height<={target_height}]/b[height<={target_height}]/best'
@@ -330,7 +370,7 @@ async def download_media(
                 logger.warning(f"⚠️ Requested quality unavailable for {url}. Falling back to best stream...")
                 fallback_opts = dict(download_custom_opts)
                 fallback_opts['format'] = 'b/best'
-                raw_filename = await asyncio-to_thread(_sync_download_media, url, fallback_opts)
+                raw_filename = await asyncio.to_thread(_sync_download_media, url, fallback_opts)
             else:
                 raise primary_err
 
@@ -351,7 +391,7 @@ async def download_media(
                 else:
                     raise FileNotFoundError("Processed output file missing on server.")
 
-        # Clean up the task isolation directory after the client receives the file
+        # Clean up the task isolation directory after the client receives the file response
         background_tasks.add_task(remove_temp_directory, task_dir)
 
         return FileResponse(
@@ -367,6 +407,10 @@ async def download_media(
         raise HTTPException(status_code=400, detail=f"Download execution failed: {err_msg}")
 
 
+# ----------------------------------------------------------------------
+# 7. APPLICATION ENTRYPOINT
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
