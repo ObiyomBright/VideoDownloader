@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Snaptube-Grade Engine API", 
-    version="4.4.0", 
+    version="4.5.0", 
     lifespan=lifespan
 )
 
@@ -110,7 +110,7 @@ def sanitize_and_write_cookies(src_path: str, dst_path: str) -> bool:
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
     if "youtube.com" in url or "youtu.be" in url:
-        return None
+        filename = "youtube.txt"
     elif "instagram.com" in url:
         filename = "instagram.txt"
     elif "tiktok.com" in url:
@@ -130,24 +130,24 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
 def build_bulletproof_options(
     url: str, 
-    client_tier: str = "web_creator", 
+    client_tier: str = "tv_embedded", 
     use_proxy: bool = True,
     custom_opts: Optional[dict] = None
 ) -> dict:
     is_youtube = "youtube.com" in url or "youtu.be" in url
 
-    # Map client tiers to resilient player configurations
-    if client_tier == "web_creator":
-        clients = ['web_creator', 'web']
-        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
-    elif client_tier == "android":
-        clients = ['android', 'android_embedded']
-        user_agent = 'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
-    elif client_tier == "ios":
-        clients = ['ios', 'mweb']
-        user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+    # Map client tiers to resilient player client configurations
+    if client_tier == "tv_embedded":
+        clients = ['tv_embedded', 'mweb', 'web']
+        user_agent = 'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV; Maple2012) AppleWebKit/534.7 (KHTML, like Gecko) SmartTV Safari/534.7'
+    elif client_tier == "android_creator":
+        clients = ['android_creator', 'android', 'mweb']
+        user_agent = 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+    elif client_tier == "mweb":
+        clients = ['mweb', 'web_creator']
+        user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
     else:
-        clients = ['web_creator', 'android']
+        clients = ['tv_embedded', 'mweb', 'android_creator']
         user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
 
     opts: Dict[str, Any] = {
@@ -170,6 +170,11 @@ def build_bulletproof_options(
         },
     }
 
+    cookie_file = get_cookie_file_for_url(url)
+    if cookie_file:
+        opts['cookiefile'] = cookie_file
+        logger.info(f"🍪 Using cookie file: {cookie_file}")
+
     if use_proxy:
         opts['proxy'] = RAW_PROXY_URL
 
@@ -177,7 +182,7 @@ def build_bulletproof_options(
         opts['extractor_args'] = {
             'youtube': {
                 'player_client': clients,
-                'player_skip': ['js', 'configs'],
+                'player_skip': ['configs'],
             }
         }
 
@@ -199,10 +204,9 @@ def remove_temp_directory(dirpath: str):
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
     strategies = [
-        ("web_creator", True),
-        ("android", True),
-        ("ios", True),
-        ("web_creator", False),
+        ("tv_embedded", True),
+        ("android_creator", True),
+        ("mweb", True),
     ]
     
     last_err = None
@@ -228,12 +232,11 @@ def _sync_extract_info(url: str):
     raise RuntimeError(f"All extraction strategies failed. Last error: {last_err}")
 
 def _sync_download_media(url: str, custom_download_opts: dict):
-    # Downloads try with and without proxy to avoid HTTP connection timeouts on googlevideo CDN
+    # Datacenter downloads must keep the proxy enabled to bypass IP bot checks
     strategies = [
-        ("web_creator", False),
-        ("android", False),
-        ("ios", False),
-        ("web_creator", True),
+        ("tv_embedded", True),
+        ("android_creator", True),
+        ("mweb", True),
     ]
     
     last_err = None
@@ -343,12 +346,12 @@ async def download_media(
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
         if target_height:
             format_selector = (
-                f'best[height<={target_height}]/'
                 f'bestvideo[height<={target_height}]+bestaudio/'
+                f'best[height<={target_height}]/'
                 f'b/best'
             )
         else:
-            format_selector = 'best/b/bestvideo+bestaudio'
+            format_selector = 'bestvideo+bestaudio/best/b'
             
         post_processors = []
         ext = 'mp4'
@@ -364,7 +367,7 @@ async def download_media(
         try:
             raw_filename = await asyncio.to_thread(_sync_download_media, url, download_custom_opts)
         except Exception as primary_err:
-            logger.warning("⚠️ High quality format download failed. Attempting fallback single-stream download...")
+            logger.warning("⚠️ Requested high quality format unavailable. Attempting fallback single-stream download...")
             fallback_opts = dict(download_custom_opts)
             fallback_opts['format'] = 'b/best'
             raw_filename = await asyncio.to_thread(_sync_download_media, url, fallback_opts)
