@@ -65,7 +65,6 @@ scheduler = BackgroundScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifespan manager for background jobs."""
     scheduler.add_job(update_ytdlp_engine, 'interval', hours=24)
     scheduler.start()
     logger.info("🚀 App startup complete. Background scheduler active.")
@@ -75,7 +74,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Snaptube-Grade Engine API", 
-    version="4.3.0", 
+    version="4.4.0", 
     lifespan=lifespan
 )
 
@@ -131,24 +130,25 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
 def build_bulletproof_options(
     url: str, 
-    client_tier: str = "android_embedded", 
-    use_cookies: bool = False, 
+    client_tier: str = "web_creator", 
+    use_proxy: bool = True,
     custom_opts: Optional[dict] = None
 ) -> dict:
     is_youtube = "youtube.com" in url or "youtu.be" in url
 
-    if client_tier == "android_embedded":
-        clients = ['android_embedded', 'android']
-        user_agent = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
-    elif client_tier == "tv_embedded":
-        clients = ['tv_embedded', 'tv']
-        user_agent = 'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) Version/6.0 TV Safari/537.36'
+    # Map client tiers to resilient player configurations
+    if client_tier == "web_creator":
+        clients = ['web_creator', 'web']
+        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+    elif client_tier == "android":
+        clients = ['android', 'android_embedded']
+        user_agent = 'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
     elif client_tier == "ios":
         clients = ['ios', 'mweb']
         user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
     else:
-        clients = ['android_embedded', 'mweb']
-        user_agent = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+        clients = ['web_creator', 'android']
+        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
 
     opts: Dict[str, Any] = {
         'quiet': True,
@@ -159,11 +159,9 @@ def build_bulletproof_options(
         'prefer_ffmpeg': True,
         'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(),
         'hls_use_mpegts': True,
-        'proxy': RAW_PROXY_URL,
         'socket_timeout': 30,
         'retries': 10,
         'fragment_retries': 10,
-        'http_chunk_size': 10485760,  # 10MB chunking prevents googlevideo read timeouts
         'http_headers': {
             'User-Agent': user_agent,
             'Accept': '*/*',
@@ -172,19 +170,16 @@ def build_bulletproof_options(
         },
     }
 
+    if use_proxy:
+        opts['proxy'] = RAW_PROXY_URL
+
     if is_youtube:
         opts['extractor_args'] = {
             'youtube': {
                 'player_client': clients,
-                'player_skip': ['webpage'],  # Skip webpage scrape to prevent botguard challenge
+                'player_skip': ['js', 'configs'],
             }
         }
-        opts['source_address'] = '0.0.0.0'
-
-        if use_cookies:
-            cookie_file = get_cookie_file_for_url(url)
-            if cookie_file:
-                opts['cookiefile'] = cookie_file
 
     if custom_opts:
         opts.update(custom_opts)
@@ -200,25 +195,25 @@ def remove_temp_directory(dirpath: str):
         logger.error(f"Failed to cleanup directory {dirpath}: {e}")
 
 # ----------------------------------------------------------------------
-# 4. WORKER EXECUTORS WITH REORDERED STRATEGIES
+# 4. WORKER EXECUTORS WITH MULTI-TIER FALLBACKS
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
-    # Priorities re-ordered based on production performance logs
     strategies = [
-        ("android_embedded", False),
-        ("tv_embedded", False),
-        ("ios", False),
+        ("web_creator", True),
+        ("android", True),
+        ("ios", True),
+        ("web_creator", False),
     ]
     
     last_err = None
 
-    for tier, use_cookies in strategies:
+    for tier, use_proxy in strategies:
         try:
-            logger.info(f"🔄 Extraction attempt strategy: tier=[{tier}], cookies=[{use_cookies}]")
+            logger.info(f"🔄 Extraction strategy: tier=[{tier}], proxy=[{use_proxy}]")
             opts = build_bulletproof_options(
                 url, 
                 client_tier=tier, 
-                use_cookies=use_cookies, 
+                use_proxy=use_proxy, 
                 custom_opts={'skip_download': True}
             )
             with yt_dlp.YoutubeDL(opts) as ytdl:
@@ -233,21 +228,23 @@ def _sync_extract_info(url: str):
     raise RuntimeError(f"All extraction strategies failed. Last error: {last_err}")
 
 def _sync_download_media(url: str, custom_download_opts: dict):
+    # Downloads try with and without proxy to avoid HTTP connection timeouts on googlevideo CDN
     strategies = [
-        ("android_embedded", False),
-        ("tv_embedded", False),
+        ("web_creator", False),
+        ("android", False),
         ("ios", False),
+        ("web_creator", True),
     ]
     
     last_err = None
 
-    for tier, use_cookies in strategies:
+    for tier, use_proxy in strategies:
         try:
-            logger.info(f"🔄 Download attempt strategy: tier=[{tier}], cookies=[{use_cookies}]")
+            logger.info(f"🔄 Download strategy: tier=[{tier}], proxy=[{use_proxy}]")
             opts = build_bulletproof_options(
                 url, 
                 client_tier=tier, 
-                use_cookies=use_cookies, 
+                use_proxy=use_proxy, 
                 custom_opts=custom_download_opts
             )
             with yt_dlp.YoutubeDL(opts) as ytdl:
@@ -346,13 +343,12 @@ async def download_media(
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
         if target_height:
             format_selector = (
-                f'bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/'
-                f'bestvideo[height<={target_height}]+bestaudio/'
                 f'best[height<={target_height}]/'
+                f'bestvideo[height<={target_height}]+bestaudio/'
                 f'b/best'
             )
         else:
-            format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best/b'
+            format_selector = 'best/b/bestvideo+bestaudio'
             
         post_processors = []
         ext = 'mp4'
@@ -368,7 +364,7 @@ async def download_media(
         try:
             raw_filename = await asyncio.to_thread(_sync_download_media, url, download_custom_opts)
         except Exception as primary_err:
-            logger.warning(f"⚠️ Specific quality selector failed. Executing fallback download with best single stream...")
+            logger.warning("⚠️ High quality format download failed. Attempting fallback single-stream download...")
             fallback_opts = dict(download_custom_opts)
             fallback_opts['format'] = 'b/best'
             raw_filename = await asyncio.to_thread(_sync_download_media, url, fallback_opts)
@@ -409,5 +405,5 @@ async def download_media(
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
