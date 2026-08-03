@@ -4,8 +4,6 @@ import uuid
 import shutil
 import asyncio
 import logging
-import tempfile
-import subprocess
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
@@ -46,7 +44,6 @@ os.makedirs(TEMP_DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(COOKIES_DIR, exist_ok=True)
 os.makedirs(WRITABLE_COOKIES_DIR, exist_ok=True)
 
-# Default ScraperAPI proxy integration
 DEFAULT_SCRAPER_API_KEY = "ee6481adddd9f7163ef8224badf1a3d2"
 RAW_PROXY_URL = os.getenv("PROXY_URL") or f"http://scraperapi:{DEFAULT_SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
 
@@ -54,9 +51,10 @@ RAW_PROXY_URL = os.getenv("PROXY_URL") or f"http://scraperapi:{DEFAULT_SCRAPER_A
 # 2. ENGINE MAINTENANCE & SCHEDULER
 # ----------------------------------------------------------------------
 def update_ytdlp_engine():
-    """Clears yt-dlp cache directory to prevent invalid session tokens."""
+    """Clears yt-dlp cache directory to prevent stale player JS tokens."""
     logger.info("🔄 Triggering on-demand engine cache cleanup...")
     try:
+        import subprocess
         cache_cmd = [sys.executable, "-m", "yt_dlp", "--rm-cache-dir"]
         subprocess.run(cache_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
         logger.info("🧹 Engine cache cleared successfully.")
@@ -76,8 +74,8 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 App shutdown complete.")
 
 app = FastAPI(
-    title="SnapTube-Grade Engine API", 
-    version="4.0.0", 
+    title="Snaptube-Grade Engine API", 
+    version="4.1.0", 
     lifespan=lifespan
 )
 
@@ -141,21 +139,26 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
     return None
 
-def build_bulletproof_options(url: str, client_tier: str = "android", custom_opts: Optional[dict] = None) -> dict:
+def build_bulletproof_options(
+    url: str, 
+    client_tier: str = "ios", 
+    use_cookies: bool = True, 
+    custom_opts: Optional[dict] = None
+) -> dict:
     is_youtube = "youtube.com" in url or "youtu.be" in url
 
-    if client_tier == "android":
+    if client_tier == "ios":
+        clients = ['ios', 'mweb']
+        user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+    elif client_tier == "android":
         clients = ['android', 'ios']
         user_agent = 'com.google.android.youtube/19.29.37 (Linux; U; Android 14; en_US)'
     elif client_tier == "tv":
         clients = ['tv', 'tv_embedded']
         user_agent = 'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) Version/6.0 TV Safari/537.36'
-    elif client_tier == "creator":
-        clients = ['web_creator', 'android_vr']
-        user_agent = 'Mozilla/5.0 (Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0'
     else:
-        clients = ['ios', 'mweb', 'android']
-        user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+        clients = ['web', 'mweb']
+        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
 
     opts: Dict[str, Any] = {
         'quiet': True,
@@ -177,13 +180,13 @@ def build_bulletproof_options(url: str, client_tier: str = "android", custom_opt
         opts['extractor_args'] = {
             'youtube': {
                 'player_client': clients,
-                'player_skip': ['configs', 'webpage'],
             }
         }
         
-        cookie_file = get_cookie_file_for_url(url)
-        if cookie_file:
-            opts['cookiefile'] = cookie_file
+        if use_cookies:
+            cookie_file = get_cookie_file_for_url(url)
+            if cookie_file:
+                opts['cookiefile'] = cookie_file
 
     if custom_opts:
         opts.update(custom_opts)
@@ -202,40 +205,62 @@ def remove_temp_directory(dirpath: str):
 # 4. WORKER EXECUTORS WITH MULTI-TIER FALLBACKS
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
-    tiers = ["android", "tv", "creator", "fallback"]
+    strategies = [
+        ("ios", True),
+        ("android", True),
+        ("tv", False),       # Try TV client without cookies (uncensored anonymous)
+        ("web", False),      # Standard web client clean proxy fallback
+    ]
+    
     last_err = None
 
-    for tier in tiers:
+    for tier, use_cookies in strategies:
         try:
-            logger.info(f"🔄 Extraction attempt using strategy tier: [{tier}]")
-            opts = build_bulletproof_options(url, client_tier=tier, custom_opts={'skip_download': True})
+            logger.info(f"🔄 Extraction attempt strategy: tier=[{tier}], cookies=[{use_cookies}]")
+            opts = build_bulletproof_options(
+                url, 
+                client_tier=tier, 
+                use_cookies=use_cookies, 
+                custom_opts={'skip_download': True}
+            )
             with yt_dlp.YoutubeDL(opts) as ytdl:
                 info = ytdl.extract_info(url, download=False)
                 if info and ('formats' in info or 'url' in info):
                     logger.info(f"✅ Extraction succeeded with tier [{tier}].")
                     return info
         except Exception as err:
-            logger.warning(f"⚠️ Tier [{tier}] extraction failed: {err}")
+            logger.warning(f"⚠️ Strategy tier [{tier}] extraction failed: {err}")
             last_err = err
 
-    raise RuntimeError(f"All extraction tiers failed. Last error: {last_err}")
+    raise RuntimeError(f"All extraction strategies failed. Last error: {last_err}")
 
 def _sync_download_media(url: str, custom_download_opts: dict):
-    tiers = ["android", "tv", "creator", "fallback"]
+    strategies = [
+        ("ios", True),
+        ("android", True),
+        ("tv", False),
+        ("web", False),
+    ]
+    
     last_err = None
 
-    for tier in tiers:
+    for tier, use_cookies in strategies:
         try:
-            logger.info(f"🔄 Download attempt using strategy tier: [{tier}]")
-            opts = build_bulletproof_options(url, client_tier=tier, custom_opts=custom_download_opts)
+            logger.info(f"🔄 Download attempt strategy: tier=[{tier}], cookies=[{use_cookies}]")
+            opts = build_bulletproof_options(
+                url, 
+                client_tier=tier, 
+                use_cookies=use_cookies, 
+                custom_opts=custom_download_opts
+            )
             with yt_dlp.YoutubeDL(opts) as ytdl:
                 info = ytdl.extract_info(url, download=True)
                 return ytdl.prepare_filename(info)
         except Exception as err:
-            logger.warning(f"⚠️ Tier [{tier}] download failed: {err}")
+            logger.warning(f"⚠️ Strategy tier [{tier}] download failed: {err}")
             last_err = err
 
-    raise RuntimeError(f"All download tiers failed. Last error: {last_err}")
+    raise RuntimeError(f"All download strategies failed. Last error: {last_err}")
 
 # ----------------------------------------------------------------------
 # 5. ENDPOINTS
