@@ -57,11 +57,16 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
     logger.info("🛑 App shutdown complete.")
 
-app = FastAPI(title="SnapTube-Grade Engine API", version="3.5.0", lifespan=lifespan)
+app = FastAPI(title="SnapTube-Grade Engine API", version="3.6.0", lifespan=lifespan)
 
 # ----------------------------------------------------------------------
-# 1. LIGHTWEIGHT HEALTH CHECK
+# 1. ROOT & HEALTH CHECK ENDPOINTS
 # ----------------------------------------------------------------------
+@app.get("/")
+async def root():
+    """Root endpoint to handle automated cloud provider platform pings."""
+    return {"status": "online", "message": "Video Downloader Engine API is running."}
+
 @app.get("/healthz")
 async def health_check():
     """Ultra-lightweight ping endpoint to keep Render from spinning down."""
@@ -125,13 +130,12 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
 def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str = "primary") -> dict:
     """
-    Datacenter-proof YouTube extraction parameters.
-    Allows HLS and DASH stream manifests so yt-dlp can locate formats.
+    Production extraction parameters optimized for datacenter IPs.
     """
     if tier == "fallback":
-        player_clients = ['ios', 'mweb', 'web_creator', 'tv_embedded']
+        player_clients = ['ios', 'mweb', 'tv_embedded', 'android']
     else:
-        player_clients = ['android', 'ios', 'mweb', 'web']
+        player_clients = ['ios', 'android', 'mweb', 'web']
 
     base_opts: Dict[str, Any] = {
         'quiet': True,
@@ -140,6 +144,7 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
         'geo_bypass': True,
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
+        'format': 'all',  # Prevent "Requested format is not available" during info extraction
         'extractor_args': {
             'youtube': {
                 'player_client': player_clients,
@@ -202,7 +207,7 @@ def _sync_download_media(url: str, custom_download_opts: dict):
             return ytdl.prepare_filename(info)
 
 # ----------------------------------------------------------------------
-# 4. ENDPOINTS
+# 4. API ENDPOINTS
 # ----------------------------------------------------------------------
 
 @app.get("/api/v1/extract/url")
@@ -213,18 +218,23 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
         formats = []
         if 'formats' in info and isinstance(info['formats'], list):
             for f in info['formats']:
-                if f.get('vcodec') != 'none' or f.get('acodec') != 'none':
+                # Deduplicate and extract readable quality formats
+                vcodec = f.get('vcodec', 'none')
+                acodec = f.get('acodec', 'none')
+                if vcodec != 'none' or acodec != 'none':
                     filesize = f.get('filesize') or f.get('filesize_approx')
+                    height = f.get('height')
                     quality_label = (
                         f.get('format_note') or
                         f.get('resolution') or
-                        (f"{f.get('height')}p" if f.get('height') else "Audio/Video")
+                        (f"{height}p" if height else "Audio/Video")
                     )
                     formats.append({
                         'format_id': f.get('format_id'),
                         'quality': quality_label,
                         'ext': f.get('ext'),
-                        'vcodec': f.get('vcodec'),
+                        'vcodec': vcodec,
+                        'acodec': acodec,
                         'filesize_str': f"{round(filesize / (1024*1024), 2)} MB" if filesize else None,
                         'direct_url': f.get('url'),
                     })
@@ -261,7 +271,7 @@ async def download_media(
         ext = 'mp3'
     else:
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else "1080"
-        format_selector = f'bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={target_height}]+bestaudio/best[ext=mp4]/best'
+        format_selector = f'bestvideo[height<={target_height}]+bestaudio/bestvideo+bestaudio/best'
         post_processors = []
         ext = 'mp4'
 
