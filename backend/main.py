@@ -1,5 +1,6 @@
 import os
 import sys
+import uuid
 import shutil
 import asyncio
 import logging
@@ -84,20 +85,45 @@ async def trigger_cron_update():
     return {"status": "success", "message": "Engine update triggered successfully."}
 
 # ----------------------------------------------------------------------
-# 3. HELPER FUNCTIONS & OPTIONS
+# 3. HELPER FUNCTIONS & COOKIE SANITIZATION
 # ----------------------------------------------------------------------
-def get_next_proxy() -> Optional[str]:
-    global proxy_index
-    if not PROXIES:
-        return None
-    selected_proxy = PROXIES[proxy_index % len(PROXIES)]
-    proxy_index += 1
-    return selected_proxy
+def sanitize_and_write_cookies(src_path: str, dst_path: str) -> bool:
+    """
+    Sanitizes Netscape format cookie files by removing invalid empty lines, 
+    extra trailing whitespace, and verifying 7-column structures.
+    """
+    try:
+        with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+
+        valid_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                valid_lines.append(stripped)
+                continue
+
+            parts = stripped.split("\t")
+            if len(parts) == 7:
+                valid_lines.append(stripped)
+
+        if valid_lines:
+            sanitized_content = "\n".join(valid_lines) + "\n"
+            with open(dst_path, "w", encoding="utf-8") as f:
+                f.write(sanitized_content)
+            return True
+        else:
+            logger.warning(f"⚠️ Cookie file at {src_path} had no valid Netscape entries.")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Failed to sanitize cookie file {src_path}: {e}")
+        return False
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
     """
-    Copies Render Secret Files (/etc/secrets/) to writable /tmp/downloads/cookies/
-    to prevent yt-dlp [Errno 30] Read-only file system crashes on Render.
+    Sanitizes and copies Render Secret Files or local cookie files to writable /tmp/downloads/cookies/
     """
     if "youtube.com" in url or "youtu.be" in url:
         filename = "youtube.txt"
@@ -113,27 +139,26 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
     writable_path = os.path.join(WRITABLE_COOKIES_DIR, filename)
 
     if os.path.exists(render_secret_path) and os.path.getsize(render_secret_path) > 0:
-        try:
-            shutil.copyfile(render_secret_path, writable_path)
-            logger.info(f"🔑 Copied Render Secret Cookie to Writable Path: {writable_path}")
+        if sanitize_and_write_cookies(render_secret_path, writable_path):
+            logger.info(f"🔑 Cleaned & Copied Render Secret Cookie to: {writable_path}")
             return writable_path
-        except Exception as e:
-            logger.error(f"❌ Failed to copy secret cookie file: {e}")
 
     if os.path.exists(local_cookie_path) and os.path.getsize(local_cookie_path) > 0:
-        try:
-            shutil.copyfile(local_cookie_path, writable_path)
-            logger.info(f"🔑 Copied Local Cookie to Writable Path: {writable_path}")
+        if sanitize_and_write_cookies(local_cookie_path, writable_path):
+            logger.info(f"🔑 Cleaned & Copied Local Cookie to: {writable_path}")
             return writable_path
-        except Exception as e:
-            logger.error(f"❌ Failed to copy local cookie file: {e}")
 
     return None
 
+def get_next_proxy() -> Optional[str]:
+    global proxy_index
+    if not PROXIES:
+        return None
+    selected_proxy = PROXIES[proxy_index % len(PROXIES)]
+    proxy_index += 1
+    return selected_proxy
+
 def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str = "primary") -> dict:
-    """
-    Production extraction parameters optimized for datacenter IPs.
-    """
     if tier == "fallback":
         player_clients = ['ios', 'mweb', 'tv_embedded', 'android']
     else:
@@ -146,7 +171,8 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
         'geo_bypass': True,
         'concurrent_fragment_downloads': 5,
         'prefer_ffmpeg': True,
-        'format': 'all',  # Prevent format restriction during info extraction
+        'hls_use_mpegts': True,  # Prevents HLS .part-Frag renaming race conditions
+        'format': 'all',
         'extractor_args': {
             'youtube': {
                 'player_client': player_clients,
@@ -171,13 +197,13 @@ def build_ytdlp_options(url: str, custom_opts: Optional[dict] = None, tier: str 
 
     return base_opts
 
-def remove_temp_file(filepath: str):
+def remove_temp_directory(dirpath: str):
     try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-            logger.info(f"Cleaned temp file: {filepath}")
+        if os.path.exists(dirpath):
+            shutil.rmtree(dirpath)
+            logger.info(f"Cleaned task directory: {dirpath}")
     except Exception as e:
-        logger.error(f"Failed to cleanup temp file {filepath}: {e}")
+        logger.error(f"Failed to cleanup directory {dirpath}: {e}")
 
 # ----------------------------------------------------------------------
 # SYNCHRONOUS WORKER WRAPPERS WITH RETRY LOGIC
@@ -188,7 +214,7 @@ def _sync_extract_info(url: str):
         with yt_dlp.YoutubeDL(primary_opts) as ytdl:
             return ytdl.extract_info(url, download=False)
     except Exception as first_err:
-        logger.warning(f"⚠️ Primary client extraction failed for {url}. Attempting fallback client chain... Error: {first_err}")
+        logger.warning(f"⚠️ Primary client extraction failed for {url}. Attempting fallback... Error: {first_err}")
         update_ytdlp_engine()
         fallback_opts = build_ytdlp_options(url, {'skip_download': True}, tier="fallback")
         with yt_dlp.YoutubeDL(fallback_opts) as ytdl:
@@ -211,7 +237,6 @@ def _sync_download_media(url: str, custom_download_opts: dict):
 # ----------------------------------------------------------------------
 # 4. API ENDPOINTS
 # ----------------------------------------------------------------------
-
 @app.get("/api/v1/extract/url")
 async def extract_info(url: str = Query(..., description="Media platform URL")):
     try:
@@ -264,7 +289,12 @@ async def download_media(
     quality: str = Query("best"),
     audio_only: bool = Query(False)
 ):
-    output_template = os.path.join(TEMP_DOWNLOAD_DIR, '%(id)s_%(title).30s.%(ext)s')
+    # Isolate each download task into a unique temporary directory to avoid concurrent file collision
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DOWNLOAD_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    output_template = os.path.join(task_dir, '%(id)s_%(title).30s.%(ext)s')
 
     if audio_only:
         format_selector = 'ba/b'
@@ -274,10 +304,13 @@ async def download_media(
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
         
         if target_height:
-            # bv* allows fallback to combined video+audio formats if separate streams aren't served
-            format_selector = f'bv*[height<={target_height}]+ba/b[height<={target_height}]/bv*+ba/b'
+            # Fallback format string ensuring best video under or equal to requested height
+            format_selector = (
+                f'bv*[height<={target_height}]+ba/b[height<={target_height}]/'
+                f'bv*[height<={target_height}]/b[height<={target_height}]/best'
+            )
         else:
-            format_selector = 'bv*+ba/b'
+            format_selector = 'bv*+ba/b/best'
             
         post_processors = []
         ext = 'mp4'
@@ -290,16 +323,14 @@ async def download_media(
     }
 
     try:
-        # Attempt download with target quality selector
         try:
             raw_filename = await asyncio.to_thread(_sync_download_media, url, download_custom_opts)
         except Exception as primary_err:
             if "Requested format is not available" in str(primary_err):
-                logger.warning(f"⚠️ Resolution {quality} unavailable for {url}. Falling back to best available stream...")
-                # Fallback to any available working stream (highest to lowest)
+                logger.warning(f"⚠️ Requested quality unavailable for {url}. Falling back to best stream...")
                 fallback_opts = dict(download_custom_opts)
                 fallback_opts['format'] = 'b/best'
-                raw_filename = await asyncio.to_thread(_sync_download_media, url, fallback_opts)
+                raw_filename = await asyncio-to_thread(_sync_download_media, url, fallback_opts)
             else:
                 raise primary_err
 
@@ -310,19 +341,18 @@ async def download_media(
             if os.path.exists(raw_filename):
                 final_filename = raw_filename
             else:
-                # Scan download directory if filename output template had substitutions
-                file_id = os.path.basename(raw_filename).split('_')[0]
                 matched_files = [
-                    os.path.join(TEMP_DOWNLOAD_DIR, f)
-                    for f in os.listdir(TEMP_DOWNLOAD_DIR)
-                    if file_id in f and not f.endswith('.part')
+                    os.path.join(task_dir, f)
+                    for f in os.listdir(task_dir)
+                    if not f.endswith('.part') and not f.endswith('.ytdl')
                 ]
                 if matched_files:
                     final_filename = matched_files[0]
                 else:
                     raise FileNotFoundError("Processed output file missing on server.")
 
-        background_tasks.add_task(remove_temp_file, final_filename)
+        # Clean up the task isolation directory after the client receives the file
+        background_tasks.add_task(remove_temp_directory, task_dir)
 
         return FileResponse(
             path=final_filename,
@@ -331,6 +361,7 @@ async def download_media(
         )
 
     except Exception as e:
+        background_tasks.add_task(remove_temp_directory, task_dir)
         err_msg = str(e).strip() or repr(e) or "Unknown download failure"
         logger.error(f"Download processing error: {err_msg}")
         raise HTTPException(status_code=400, detail=f"Download execution failed: {err_msg}")
