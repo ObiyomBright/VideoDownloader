@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Snaptube-Grade Engine API", 
-    version="4.1.0", 
+    version="4.2.0", 
     lifespan=lifespan
 )
 
@@ -110,8 +110,9 @@ def sanitize_and_write_cookies(src_path: str, dst_path: str) -> bool:
         return False
 
 def get_cookie_file_for_url(url: str) -> Optional[str]:
+    # Youtube cookies are intentionally disabled to prevent account-wide rate limits
     if "youtube.com" in url or "youtu.be" in url:
-        filename = "youtube.txt"
+        return None
     elif "instagram.com" in url:
         filename = "instagram.txt"
     elif "tiktok.com" in url:
@@ -120,16 +121,6 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
         filename = "cookies.txt"
 
     writable_path = os.path.join(WRITABLE_COOKIES_DIR, filename)
-
-    cookie_env = os.getenv("YOUTUBE_COOKIES_TEXT") or os.getenv("RENDER_SECRET_COOKIE")
-    if cookie_env and ("youtube" in filename or "cookies" in filename):
-        try:
-            cleaned_content = cookie_env.replace("\\n", "\n")
-            with open(writable_path, "w", encoding="utf-8") as f:
-                f.write(cleaned_content)
-            return writable_path
-        except Exception as e:
-            logger.error(f"Failed writing cookie environment variable: {e}")
 
     for search_dir in [RENDER_SECRETS_DIR, COOKIES_DIR, str(BASE_DIR)]:
         candidate = os.path.join(search_dir, filename if search_dir != str(BASE_DIR) else "cookies.txt")
@@ -141,24 +132,24 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
 def build_bulletproof_options(
     url: str, 
-    client_tier: str = "ios", 
-    use_cookies: bool = True, 
+    client_tier: str = "mweb", 
+    use_cookies: bool = False, 
     custom_opts: Optional[dict] = None
 ) -> dict:
     is_youtube = "youtube.com" in url or "youtu.be" in url
 
-    if client_tier == "ios":
-        clients = ['ios', 'mweb']
+    if client_tier == "mweb":
+        clients = ['mweb', 'ios']
         user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
-    elif client_tier == "android":
-        clients = ['android', 'ios']
-        user_agent = 'com.google.android.youtube/19.29.37 (Linux; U; Android 14; en_US)'
-    elif client_tier == "tv":
-        clients = ['tv', 'tv_embedded']
+    elif client_tier == "tv_embedded":
+        clients = ['tv_embedded', 'tv']
         user_agent = 'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) Version/6.0 TV Safari/537.36'
+    elif client_tier == "android_embedded":
+        clients = ['android_embedded', 'android']
+        user_agent = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
     else:
-        clients = ['web', 'mweb']
-        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+        clients = ['mweb', 'tv_embedded']
+        user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
 
     opts: Dict[str, Any] = {
         'quiet': True,
@@ -172,7 +163,9 @@ def build_bulletproof_options(
         'proxy': RAW_PROXY_URL,
         'http_headers': {
             'User-Agent': user_agent,
+            'Accept': '*/*',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Mode': 'navigate',
         },
     }
 
@@ -182,7 +175,8 @@ def build_bulletproof_options(
                 'player_client': clients,
             }
         }
-        
+        opts['source_address'] = '0.0.0.0'
+
         if use_cookies:
             cookie_file = get_cookie_file_for_url(url)
             if cookie_file:
@@ -206,10 +200,9 @@ def remove_temp_directory(dirpath: str):
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
     strategies = [
-        ("ios", True),
-        ("android", True),
-        ("tv", False),       # Try TV client without cookies (uncensored anonymous)
-        ("web", False),      # Standard web client clean proxy fallback
+        ("mweb", False),
+        ("tv_embedded", False),
+        ("android_embedded", False),
     ]
     
     last_err = None
@@ -236,10 +229,9 @@ def _sync_extract_info(url: str):
 
 def _sync_download_media(url: str, custom_download_opts: dict):
     strategies = [
-        ("ios", True),
-        ("android", True),
-        ("tv", False),
-        ("web", False),
+        ("mweb", False),
+        ("tv_embedded", False),
+        ("android_embedded", False),
     ]
     
     last_err = None
