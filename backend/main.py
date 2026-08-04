@@ -47,7 +47,7 @@ os.makedirs(WRITABLE_COOKIES_DIR, exist_ok=True)
 DEFAULT_SCRAPER_API_KEY = "ee6481adddd9f7163ef8224badf1a3d2"
 RAW_PROXY_URL = os.getenv("PROXY_URL") or f"http://scraperapi:{DEFAULT_SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
 
-# PO Token / Botguard Configuration from Environment
+# PO Token / Visitor Data configuration from environment
 ENV_PO_TOKEN = os.getenv("YOUTUBE_PO_TOKEN")
 ENV_VISITOR_DATA = os.getenv("YOUTUBE_VISITOR_DATA")
 
@@ -73,12 +73,17 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("🚀 App startup complete. Background scheduler active with PO-Token support.")
     yield
+    # Graceful shutdown: cancel pending tasks to prevent unhandled stdout prints
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     scheduler.shutdown()
     logger.info("🛑 App shutdown complete.")
 
 app = FastAPI(
     title="Snaptube-Grade Engine API", 
-    version="5.0.0", 
+    version="5.1.0", 
     lifespan=lifespan
 )
 
@@ -124,7 +129,7 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
     writable_path = os.path.join(WRITABLE_COOKIES_DIR, filename)
 
-    # Priority 1: Environment Variable Cookies
+    # Priority 1: Environment variable contents
     cookie_env = os.getenv("YOUTUBE_COOKIES_TEXT") or os.getenv("RENDER_SECRET_COOKIE")
     if cookie_env and ("youtube" in filename or "cookies" in filename):
         try:
@@ -135,7 +140,7 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
         except Exception as e:
             logger.error(f"Failed writing cookie environment variable: {e}")
 
-    # Priority 2: Secret Files
+    # Priority 2: Disk secret files
     for search_dir in [RENDER_SECRETS_DIR, COOKIES_DIR, str(BASE_DIR)]:
         candidate = os.path.join(search_dir, filename if search_dir != str(BASE_DIR) else "cookies.txt")
         if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
@@ -152,6 +157,7 @@ def build_bulletproof_options(
 ) -> dict:
     is_youtube = "youtube.com" in url or "youtu.be" in url
 
+    # Mobile & native clients bypass heavy JS bot challenges
     if client_tier == "android":
         clients = ['android', 'ios', 'mweb']
         user_agent = 'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36'
@@ -177,8 +183,8 @@ def build_bulletproof_options(
         'socket_timeout': 60,
         'retries': 10,
         'fragment_retries': 10,
-        'max_filesize': 500 * 1024 * 1024,
-        'http_chunk_size': 10 * 1024 * 1024,
+        'max_filesize': 500 * 1024 * 1024,   # 500MB safety cap for RAM protection
+        'http_chunk_size': 10 * 1024 * 1024, # 10MB chunking keeps TCP sockets active
         'http_headers': {
             'User-Agent': user_agent,
             'Accept': '*/*',
@@ -201,7 +207,6 @@ def build_bulletproof_options(
             'player_skip': ['js', 'configs'],
         }
 
-        # Inject PO Tokens into extractor arguments if available
         if ENV_PO_TOKEN and ENV_VISITOR_DATA:
             youtube_args['po_token'] = f"mweb+{ENV_PO_TOKEN}"
             youtube_args['visitor_data'] = ENV_VISITOR_DATA
@@ -257,6 +262,7 @@ def _sync_extract_info(url: str):
     raise RuntimeError(f"All extraction strategies failed. Last error: {last_err}")
 
 def _sync_download_media(url: str, task_dir: str, custom_download_opts: dict) -> str:
+    # Falls back from proxy to direct IP if proxy stream socket times out
     strategies = [
         ("android", True),
         ("ios", True),
