@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Snaptube-Grade Engine API", 
-    version="4.5.0", 
+    version="4.7.0", 
     lifespan=lifespan
 )
 
@@ -130,25 +130,25 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
 def build_bulletproof_options(
     url: str, 
-    client_tier: str = "tv_embedded", 
+    client_tier: str = "android", 
     use_proxy: bool = True,
     custom_opts: Optional[dict] = None
 ) -> dict:
     is_youtube = "youtube.com" in url or "youtu.be" in url
 
-    # Map client tiers to resilient player client configurations
-    if client_tier == "tv_embedded":
-        clients = ['tv_embedded', 'mweb', 'web']
-        user_agent = 'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV; Maple2012) AppleWebKit/534.7 (KHTML, like Gecko) SmartTV Safari/534.7'
-    elif client_tier == "android_creator":
-        clients = ['android_creator', 'android', 'mweb']
-        user_agent = 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+    # Prioritize mobile/native API clients that bypass Botguard checks
+    if client_tier == "android":
+        clients = ['android', 'ios', 'mweb']
+        user_agent = 'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36'
+    elif client_tier == "ios":
+        clients = ['ios', 'android', 'mweb']
+        user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
     elif client_tier == "mweb":
-        clients = ['mweb', 'web_creator']
-        user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+        clients = ['mweb', 'web']
+        user_agent = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
     else:
-        clients = ['tv_embedded', 'mweb', 'android_creator']
-        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+        clients = ['android', 'ios', 'mweb']
+        user_agent = 'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36'
 
     opts: Dict[str, Any] = {
         'quiet': True,
@@ -159,9 +159,11 @@ def build_bulletproof_options(
         'prefer_ffmpeg': True,
         'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(),
         'hls_use_mpegts': True,
-        'socket_timeout': 30,
+        'socket_timeout': 60,
         'retries': 10,
         'fragment_retries': 10,
+        'max_filesize': 500 * 1024 * 1024,  # Protect server memory (500MB max)
+        'http_chunk_size': 10 * 1024 * 1024, # 10MB chunks to prevent socket drops
         'http_headers': {
             'User-Agent': user_agent,
             'Accept': '*/*',
@@ -182,7 +184,7 @@ def build_bulletproof_options(
         opts['extractor_args'] = {
             'youtube': {
                 'player_client': clients,
-                'player_skip': ['configs'],
+                'player_skip': ['js', 'configs'],
             }
         }
 
@@ -204,8 +206,8 @@ def remove_temp_directory(dirpath: str):
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
     strategies = [
-        ("tv_embedded", True),
-        ("android_creator", True),
+        ("android", True),
+        ("ios", True),
         ("mweb", True),
     ]
     
@@ -231,12 +233,12 @@ def _sync_extract_info(url: str):
 
     raise RuntimeError(f"All extraction strategies failed. Last error: {last_err}")
 
-def _sync_download_media(url: str, custom_download_opts: dict):
-    # Datacenter downloads must keep the proxy enabled to bypass IP bot checks
+def _sync_download_media(url: str, task_dir: str, custom_download_opts: dict) -> str:
     strategies = [
-        ("tv_embedded", True),
-        ("android_creator", True),
-        ("mweb", True),
+        ("android", True),
+        ("ios", True),
+        ("android", False),
+        ("ios", False),
     ]
     
     last_err = None
@@ -251,10 +253,18 @@ def _sync_download_media(url: str, custom_download_opts: dict):
                 custom_opts=custom_download_opts
             )
             with yt_dlp.YoutubeDL(opts) as ytdl:
-                info = ytdl.extract_info(url, download=True)
-                return ytdl.prepare_filename(info)
+                ytdl.extract_info(url, download=True)
+                
+            downloaded_files = [
+                os.path.join(task_dir, f) for f in os.listdir(task_dir)
+                if not f.endswith('.part') and not f.endswith('.ytdl')
+            ]
+            
+            if downloaded_files:
+                return max(downloaded_files, key=os.path.getsize)
+                
         except Exception as err:
-            logger.warning(f"⚠️ Strategy tier [{tier}] download failed: {err}")
+            logger.warning(f"⚠️ Strategy tier [{tier}] (proxy={use_proxy}) download failed: {err}")
             last_err = err
 
     raise RuntimeError(f"All download strategies failed. Last error: {last_err}")
@@ -336,12 +346,11 @@ async def download_media(
     task_dir = os.path.join(TEMP_DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
 
-    output_template = os.path.join(task_dir, '%(id)s_%(title).30s.%(ext)s')
+    output_template = os.path.join(task_dir, '%(id)s.%(ext)s')
 
     if audio_only:
         format_selector = 'bestaudio/best'
         post_processors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
-        ext = 'mp3'
     else:
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
         if target_height:
@@ -354,7 +363,6 @@ async def download_media(
             format_selector = 'bestvideo+bestaudio/best/b'
             
         post_processors = []
-        ext = 'mp4'
 
     download_custom_opts = {
         'outtmpl': output_template,
@@ -365,35 +373,20 @@ async def download_media(
 
     try:
         try:
-            raw_filename = await asyncio.to_thread(_sync_download_media, url, download_custom_opts)
+            final_filename = await asyncio.to_thread(_sync_download_media, url, task_dir, download_custom_opts)
         except Exception as primary_err:
             logger.warning("⚠️ Requested high quality format unavailable. Attempting fallback single-stream download...")
             fallback_opts = dict(download_custom_opts)
             fallback_opts['format'] = 'b/best'
-            raw_filename = await asyncio.to_thread(_sync_download_media, url, fallback_opts)
-
-        base_path = os.path.splitext(raw_filename)[0]
-        final_filename = f"{base_path}.{ext}"
-
-        if not os.path.exists(final_filename):
-            if os.path.exists(raw_filename):
-                final_filename = raw_filename
-            else:
-                matched_files = [
-                    os.path.join(task_dir, f)
-                    for f in os.listdir(task_dir)
-                    if not f.endswith('.part') and not f.endswith('.ytdl')
-                ]
-                if matched_files:
-                    final_filename = matched_files[0]
-                else:
-                    raise FileNotFoundError("Processed output file missing on server.")
+            final_filename = await asyncio.to_thread(_sync_download_media, url, task_dir, fallback_opts)
 
         background_tasks.add_task(remove_temp_directory, task_dir)
 
+        safe_display_name = f"download_{task_id[:8]}." + ("mp3" if audio_only else "mp4")
+
         return FileResponse(
             path=final_filename,
-            filename=os.path.basename(final_filename),
+            filename=safe_display_name,
             media_type="audio/mpeg" if audio_only else "video/mp4"
         )
 
