@@ -47,6 +47,10 @@ os.makedirs(WRITABLE_COOKIES_DIR, exist_ok=True)
 DEFAULT_SCRAPER_API_KEY = "ee6481adddd9f7163ef8224badf1a3d2"
 RAW_PROXY_URL = os.getenv("PROXY_URL") or f"http://scraperapi:{DEFAULT_SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
 
+# PO Token / Botguard Configuration from Environment
+ENV_PO_TOKEN = os.getenv("YOUTUBE_PO_TOKEN")
+ENV_VISITOR_DATA = os.getenv("YOUTUBE_VISITOR_DATA")
+
 # ----------------------------------------------------------------------
 # 2. ENGINE MAINTENANCE & SCHEDULER
 # ----------------------------------------------------------------------
@@ -67,14 +71,14 @@ scheduler = BackgroundScheduler()
 async def lifespan(app: FastAPI):
     scheduler.add_job(update_ytdlp_engine, 'interval', hours=24)
     scheduler.start()
-    logger.info("🚀 App startup complete. Background scheduler active.")
+    logger.info("🚀 App startup complete. Background scheduler active with PO-Token support.")
     yield
     scheduler.shutdown()
     logger.info("🛑 App shutdown complete.")
 
 app = FastAPI(
     title="Snaptube-Grade Engine API", 
-    version="4.7.0", 
+    version="5.0.0", 
     lifespan=lifespan
 )
 
@@ -120,6 +124,18 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
     writable_path = os.path.join(WRITABLE_COOKIES_DIR, filename)
 
+    # Priority 1: Environment Variable Cookies
+    cookie_env = os.getenv("YOUTUBE_COOKIES_TEXT") or os.getenv("RENDER_SECRET_COOKIE")
+    if cookie_env and ("youtube" in filename or "cookies" in filename):
+        try:
+            cleaned_content = cookie_env.replace("\\n", "\n")
+            with open(writable_path, "w", encoding="utf-8") as f:
+                f.write(cleaned_content)
+            return writable_path
+        except Exception as e:
+            logger.error(f"Failed writing cookie environment variable: {e}")
+
+    # Priority 2: Secret Files
     for search_dir in [RENDER_SECRETS_DIR, COOKIES_DIR, str(BASE_DIR)]:
         candidate = os.path.join(search_dir, filename if search_dir != str(BASE_DIR) else "cookies.txt")
         if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
@@ -136,7 +152,6 @@ def build_bulletproof_options(
 ) -> dict:
     is_youtube = "youtube.com" in url or "youtu.be" in url
 
-    # Prioritize mobile/native API clients that bypass Botguard checks
     if client_tier == "android":
         clients = ['android', 'ios', 'mweb']
         user_agent = 'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36'
@@ -162,8 +177,8 @@ def build_bulletproof_options(
         'socket_timeout': 60,
         'retries': 10,
         'fragment_retries': 10,
-        'max_filesize': 500 * 1024 * 1024,  # Protect server memory (500MB max)
-        'http_chunk_size': 10 * 1024 * 1024, # 10MB chunks to prevent socket drops
+        'max_filesize': 500 * 1024 * 1024,
+        'http_chunk_size': 10 * 1024 * 1024,
         'http_headers': {
             'User-Agent': user_agent,
             'Accept': '*/*',
@@ -181,11 +196,19 @@ def build_bulletproof_options(
         opts['proxy'] = RAW_PROXY_URL
 
     if is_youtube:
+        youtube_args = {
+            'player_client': clients,
+            'player_skip': ['js', 'configs'],
+        }
+
+        # Inject PO Tokens into extractor arguments if available
+        if ENV_PO_TOKEN and ENV_VISITOR_DATA:
+            youtube_args['po_token'] = f"mweb+{ENV_PO_TOKEN}"
+            youtube_args['visitor_data'] = ENV_VISITOR_DATA
+            logger.info("🔑 Injected PO Token and Visitor Data from environment.")
+
         opts['extractor_args'] = {
-            'youtube': {
-                'player_client': clients,
-                'player_skip': ['js', 'configs'],
-            }
+            'youtube': youtube_args
         }
 
     if custom_opts:
