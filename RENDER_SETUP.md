@@ -19,11 +19,11 @@ Health check: /healthz
 
 ## Manual web-service deployment
 
-Use these values if the service is created without the Blueprint:
+Use these values if the service is created without the Blueprint. The important setting is **Root Directory: leave empty**. Your failed deploy had `backend` as the root directory, which caused Render to look for `backend/backend/requirements.txt`.
 
 ```text
 Language: Python 3
-Repository root: repository root (leave Root Directory empty)
+Root Directory: leave empty (repository root)
 Build command: pip install --upgrade pip && pip install -r backend/requirements.txt
 Start command: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
 Health check path: /healthz
