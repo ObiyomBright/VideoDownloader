@@ -15,6 +15,25 @@ const extractCleanUrl = (text) => {
   return match ? match[0] : text.trim();
 }; 
 
+const parseApiError = async (response, fallback) => {
+  try {
+    const data = await response.json();
+    return data?.detail || data?.error || fallback;
+  } catch (_) {
+    return fallback;
+  }
+};
+
+const apiFetch = async (path, options) => {
+  try {
+    return await fetch(`${API_BASE_URL}${path}`, options);
+  } catch (error) {
+    throw new Error(
+      `Cannot reach ${API_BASE_URL}. Restart Expo with "npx expo start --clear" and verify the device has internet access.`
+    );
+  }
+};
+
 // Helper to format bytes into readable string (e.g. 14.5 MB))
 const formatBytes = (bytes) => {
   if (!bytes || isNaN(bytes) || bytes === 0) return null;
@@ -28,8 +47,8 @@ export const fetchMediaInfo = async (inputUrl) => {
   const cleanUrl = extractCleanUrl(inputUrl);
   if (!cleanUrl) throw new Error('Please enter a valid media URL.');
 
-  const  response = await fetch(
-    `${API_BASE_URL}/api/v1/extract/url?url=${encodeURIComponent(cleanUrl)}`
+  const response = await apiFetch(
+    `/api/v1/extract/url?url=${encodeURIComponent(cleanUrl)}`
   );
 
   if (!response.ok) {
@@ -150,15 +169,8 @@ export const executeDownloadTask = async (item, notify) => {
   const extension = item.isAudio ? 'mp3' : 'mp4';
   const fileName = `${cleanTitle}_${item.id}.${extension}`;
 
-  const selectedQuality = item.quality || 'best';
-  const formatIdQuery = item.formatId
-    ? `&format_id=${encodeURIComponent(item.formatId)}`
-    : '';
-  const downloadEndpoint = `${API_BASE_URL}/api/v1/download?url=${encodeURIComponent(
-    item.url
-  )}&quality=${encodeURIComponent(selectedQuality)}&audio_only=${item.isAudio || false}${formatIdQuery}`;
-
   try {
+    const downloadEndpoint = await prepareDownloadOnServer(item);
     const result = await downloadToDevice(
       downloadEndpoint,
       fileName,
@@ -190,6 +202,57 @@ export const executeDownloadTask = async (item, notify) => {
   }
 };
 
+const prepareDownloadOnServer = async (item) => {
+  const store = useDownloadStore.getState();
+  const response = await apiFetch('/api/v1/download/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: item.url,
+      quality: item.quality || 'best',
+      format_id: item.formatId || null,
+      audio_only: Boolean(item.isAudio),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response, 'Unable to start download job.'));
+  }
+
+  const { job_id: jobId } = await response.json();
+  if (!jobId) throw new Error('The backend did not return a download job ID.');
+
+  while (true) {
+    const currentItem = useDownloadStore
+      .getState()
+      .downloads.find((download) => download.id === item.id);
+    if (!currentItem || currentItem.status === 'paused') {
+      throw new Error('Download paused.');
+    }
+
+    const statusResponse = await apiFetch(`/api/v1/download/jobs/${jobId}`);
+    if (!statusResponse.ok) {
+      throw new Error(
+        await parseApiError(statusResponse, 'Unable to read download progress.')
+      );
+    }
+
+    const job = await statusResponse.json();
+    const backendProgress = Number(job.progress) || 0;
+    store.updateProgress(item.id, Math.min(0.9, backendProgress * 0.9), 'downloading');
+
+    if (job.status === 'ready') {
+      store.updateProgress(item.id, 0.9, 'downloading');
+      return `${API_BASE_URL}/api/v1/download/jobs/${jobId}/file`;
+    }
+    if (job.status === 'failed') {
+      throw new Error(job.error || 'The backend could not prepare this media.');
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+};
+
 const downloadToDevice = async (
   downloadUrl,
   fileName,
@@ -210,7 +273,7 @@ const downloadToDevice = async (
       const progress = downloadProgress.totalBytesWritten / totalExpected;
 
       if (!isNaN(progress) && progress >= 0) {
-        store.updateProgress(downloadId, progress, 'downloading');
+        store.updateProgress(downloadId, 0.9 + progress * 0.1, 'downloading');
       }
     }
   };

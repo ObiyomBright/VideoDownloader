@@ -5,6 +5,7 @@ import asyncio
 import logging
 import ipaddress
 import socket
+import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import yt_dlp
 import imageio_ffmpeg
 
@@ -48,6 +50,7 @@ os.makedirs(WRITABLE_COOKIES_DIR, exist_ok=True)
 RAW_PROXY_URL = os.getenv("PROXY_URL")
 MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "2")))
 job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+download_jobs: Dict[str, Dict[str, Any]] = {}
 
 # PO token values must include their yt-dlp client and context, for example
 # "mweb.gvs+TOKEN". Multiple values can be comma-separated.
@@ -285,6 +288,107 @@ def _sync_download_media(url: str, task_dir: str, custom_download_opts: dict) ->
 
     raise RuntimeError(f"All download strategies failed. Last error: {last_err}")
 
+class DownloadJobRequest(BaseModel):
+    url: str
+    quality: str = "best"
+    format_id: Optional[str] = None
+    audio_only: bool = False
+
+def build_download_options(
+    task_dir: str,
+    quality: str,
+    format_id: Optional[str],
+    audio_only: bool,
+    progress_hook=None,
+) -> dict:
+    output_template = os.path.join(task_dir, '%(id)s.%(ext)s')
+
+    if audio_only:
+        format_selector = 'bestaudio/best'
+        post_processors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
+    elif format_id and format_id.replace("-", "").replace("_", "").isalnum():
+        format_selector = f'{format_id}+bestaudio/{format_id}/best'
+        post_processors = []
+    else:
+        normalized_quality = quality.replace("p", "")
+        target_height = normalized_quality if normalized_quality.isdigit() else None
+        if target_height:
+            format_selector = (
+                f'bestvideo[height<={target_height}]+bestaudio/'
+                f'best[height<={target_height}]/b/best'
+            )
+        else:
+            format_selector = 'bestvideo+bestaudio/best/b'
+        post_processors = []
+
+    options = {
+        'outtmpl': output_template,
+        'format': format_selector,
+        'merge_output_format': 'mp4' if not audio_only else None,
+        'postprocessors': post_processors,
+    }
+    if progress_hook:
+        options['progress_hooks'] = [progress_hook]
+    return options
+
+def prune_download_jobs():
+    cutoff = time.time() - 3600
+    expired_ids = [
+        job_id for job_id, job in download_jobs.items()
+        if job.get('created_at', 0) < cutoff
+    ]
+    for job_id in expired_ids:
+        job = download_jobs.pop(job_id, None)
+        if job:
+            remove_temp_directory(job.get('task_dir', ''))
+
+async def run_download_job(job_id: str, request: DownloadJobRequest):
+    job = download_jobs[job_id]
+
+    def progress_hook(data: dict):
+        if data.get('status') == 'downloading':
+            total = data.get('total_bytes') or data.get('total_bytes_estimate')
+            downloaded = data.get('downloaded_bytes') or 0
+            if total:
+                job['progress'] = min(0.92, max(job['progress'], downloaded / total * 0.9))
+            job['downloaded_bytes'] = downloaded
+            job['total_bytes'] = total
+            job['speed'] = data.get('speed')
+            job['eta'] = data.get('eta')
+        elif data.get('status') == 'finished':
+            job['progress'] = max(job['progress'], 0.95)
+            job['stage'] = 'processing'
+
+    options = build_download_options(
+        job['task_dir'], request.quality, request.format_id,
+        request.audio_only, progress_hook,
+    )
+
+    try:
+        job['status'] = 'running'
+        job['stage'] = 'downloading'
+        async with job_semaphore:
+            try:
+                filename = await asyncio.to_thread(
+                    _sync_download_media, request.url, job['task_dir'], options
+                )
+            except Exception:
+                fallback_options = dict(options)
+                fallback_options['format'] = 'b/best'
+                filename = await asyncio.to_thread(
+                    _sync_download_media, request.url, job['task_dir'], fallback_options
+                )
+        job.update({
+            'status': 'ready',
+            'stage': 'ready',
+            'progress': 1,
+            'filename': filename,
+            'size': os.path.getsize(filename),
+        })
+    except Exception as exc:
+        job.update({'status': 'failed', 'stage': 'failed', 'error': str(exc)})
+        remove_temp_directory(job['task_dir'])
+
 # ----------------------------------------------------------------------
 # 5. ENDPOINTS
 # ----------------------------------------------------------------------
@@ -365,33 +469,7 @@ async def download_media(
     task_dir = os.path.join(TEMP_DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
 
-    output_template = os.path.join(task_dir, '%(id)s.%(ext)s')
-
-    if audio_only:
-        format_selector = 'bestaudio/best'
-        post_processors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
-    elif format_id and format_id.replace("-", "").replace("_", "").isalnum():
-        format_selector = f'{format_id}+bestaudio/{format_id}/best'
-        post_processors = []
-    else:
-        target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
-        if target_height:
-            format_selector = (
-                f'bestvideo[height<={target_height}]+bestaudio/'
-                f'best[height<={target_height}]/'
-                f'b/best'
-            )
-        else:
-            format_selector = 'bestvideo+bestaudio/best/b'
-            
-        post_processors = []
-
-    download_custom_opts = {
-        'outtmpl': output_template,
-        'format': format_selector,
-        'merge_output_format': 'mp4' if not audio_only else None,
-        'postprocessors': post_processors,
-    }
+    download_custom_opts = build_download_options(task_dir, quality, format_id, audio_only)
 
     try:
         try:
@@ -419,6 +497,58 @@ async def download_media(
         err_msg = str(e).strip() or repr(e) or "Unknown download failure"
         logger.error(f"Download processing error: {err_msg}")
         raise HTTPException(status_code=400, detail=f"Download execution failed: {err_msg}")
+
+@app.post("/api/v1/download/jobs", status_code=202)
+async def create_download_job(request: DownloadJobRequest):
+    try:
+        request.url = validate_public_url(request.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    prune_download_jobs()
+    job_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DOWNLOAD_DIR, job_id)
+    os.makedirs(task_dir, exist_ok=True)
+    download_jobs[job_id] = {
+        'id': job_id,
+        'status': 'queued',
+        'stage': 'queued',
+        'progress': 0,
+        'created_at': time.time(),
+        'task_dir': task_dir,
+        'audio_only': request.audio_only,
+    }
+    asyncio.create_task(run_download_job(job_id, request))
+    return {'job_id': job_id, 'status': 'queued'}
+
+@app.get("/api/v1/download/jobs/{job_id}")
+async def get_download_job(job_id: str):
+    job = download_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Download job not found or expired.")
+    return {
+        key: job.get(key) for key in (
+            'id', 'status', 'stage', 'progress', 'downloaded_bytes',
+            'total_bytes', 'speed', 'eta', 'size', 'error'
+        )
+    }
+
+@app.get("/api/v1/download/jobs/{job_id}/file")
+async def get_download_job_file(job_id: str, background_tasks: BackgroundTasks):
+    job = download_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Download job not found or expired.")
+    if job.get('status') != 'ready' or not job.get('filename'):
+        raise HTTPException(status_code=409, detail="Download file is not ready.")
+
+    extension = 'mp3' if job.get('audio_only') else 'mp4'
+    background_tasks.add_task(remove_temp_directory, job['task_dir'])
+    background_tasks.add_task(download_jobs.pop, job_id, None)
+    return FileResponse(
+        path=job['filename'],
+        filename=f"download_{job_id[:8]}.{extension}",
+        media_type="audio/mpeg" if job.get('audio_only') else "video/mp4",
+    )
 
 # ----------------------------------------------------------------------
 # 6. APPLICATION ENTRYPOINT
