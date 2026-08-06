@@ -60,6 +60,15 @@ download_jobs: Dict[str, Dict[str, Any]] = {}
 ENV_PO_TOKEN_SPEC = os.getenv("YOUTUBE_PO_TOKEN_SPEC") or os.getenv("YOUTUBE_PO_TOKEN")
 ENV_VISITOR_DATA = os.getenv("YOUTUBE_VISITOR_DATA")
 
+PLATFORM_PAGE_HOSTS = (
+    'youtube.com', 'youtu.be', 'tiktok.com', 'facebook.com', 'fb.watch',
+    'instagram.com', 'snapchat.com', 'twitter.com', 'x.com', 'vimeo.com',
+)
+BLOCKED_DIRECT_MIME_TYPES = {
+    'text/html', 'application/xhtml+xml', 'application/json',
+    'application/xml', 'text/xml',
+}
+
 # ----------------------------------------------------------------------
 # 2. APPLICATION LIFECYCLE
 # ----------------------------------------------------------------------
@@ -107,6 +116,10 @@ def validate_public_url(raw_url: str) -> str:
             raise ValueError("Private and local network URLs are not supported.")
 
     return raw_url.strip()
+
+def is_platform_page_url(url: str) -> bool:
+    hostname = (urlparse(url).hostname or '').lower()
+    return any(hostname == domain or hostname.endswith(f'.{domain}') for domain in PLATFORM_PAGE_HOSTS)
 
 def sanitize_and_write_cookies(src_path: str, dst_path: str) -> bool:
     try:
@@ -263,6 +276,10 @@ def _sync_probe_direct_file(url: str) -> dict:
     with urlopen(request, timeout=30) as response:
         final_url = validate_public_url(response.geturl())
         content_type = response.headers.get_content_type() or 'application/octet-stream'
+        if content_type in BLOCKED_DIRECT_MIME_TYPES or content_type.startswith('text/'):
+            raise ValueError(
+                f'The URL returned {content_type}, not a downloadable media or document file.'
+            )
         content_length = response.headers.get('Content-Length')
         disposition = response.headers.get('Content-Disposition', '')
         filename_match = re.search(r"filename\*?=(?:UTF-8''|)[\"']?([^\"';]+)", disposition, re.I)
@@ -271,8 +288,6 @@ def _sync_probe_direct_file(url: str) -> dict:
         extension = os.path.splitext(filename)[1].lstrip('.').lower()
         if not extension:
             extension = (mimetypes.guess_extension(content_type) or '').lstrip('.')
-        if content_type in {'text/html', 'application/xhtml+xml'} and not extension:
-            raise ValueError('The URL returned a web page, not a downloadable file.')
         return {
             'title': filename,
             'original_platform_url': final_url,
@@ -446,6 +461,10 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
             async with job_semaphore:
                 info = await asyncio.to_thread(_sync_extract_info, url)
         except Exception as extractor_error:
+            if is_platform_page_url(url):
+                raise RuntimeError(
+                    f'Platform extraction failed; refusing to download the HTML page. {extractor_error}'
+                ) from extractor_error
             logger.info("yt-dlp did not recognize URL; probing direct file: %s", extractor_error)
             return JSONResponse(await asyncio.to_thread(_sync_probe_direct_file, url))
 

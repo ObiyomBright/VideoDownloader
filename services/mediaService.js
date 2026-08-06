@@ -69,6 +69,16 @@ export const fetchMediaInfo = async (inputUrl) => {
   const data = await response.json();
 
   if (data.is_direct_file) {
+    const directMimeType = String(data.mime_type || '').toLowerCase();
+    if (
+      directMimeType === 'text/html' ||
+      directMimeType === 'application/xhtml+xml' ||
+      directMimeType.startsWith('text/')
+    ) {
+      throw new Error(
+        'The server returned a web page instead of downloadable media. Platform extraction must succeed before this URL can be downloaded.'
+      );
+    }
     return {
       title: data.title || 'download',
       duration: 0,
@@ -78,7 +88,7 @@ export const fetchMediaInfo = async (inputUrl) => {
       original_platform_url: data.direct_url || cleanUrl,
       direct_url: data.direct_url || cleanUrl,
       is_direct_file: true,
-      mime_type: data.mime_type || 'application/octet-stream',
+      mime_type: directMimeType || 'application/octet-stream',
       extension: data.extension || 'bin',
       filesize: data.filesize || null,
       available_qualities: [],
