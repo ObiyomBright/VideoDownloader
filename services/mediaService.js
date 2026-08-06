@@ -1,4 +1,3 @@
-import { Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 import { useDownloadStore } from '../stores/useDownloadStore';
@@ -69,6 +68,23 @@ export const fetchMediaInfo = async (inputUrl) => {
 
   const data = await response.json();
 
+  if (data.is_direct_file) {
+    return {
+      title: data.title || 'download',
+      duration: 0,
+      thumbnail: null,
+      uploader: 'Direct download',
+      platform: 'File',
+      original_platform_url: data.direct_url || cleanUrl,
+      direct_url: data.direct_url || cleanUrl,
+      is_direct_file: true,
+      mime_type: data.mime_type || 'application/octet-stream',
+      extension: data.extension || 'bin',
+      filesize: data.filesize || null,
+      available_qualities: [],
+    };
+  }
+
   const rawQualities = Array.isArray(data.available_qualities)
     ? data.available_qualities
     : [];
@@ -111,15 +127,25 @@ export const fetchMediaInfo = async (inputUrl) => {
       formatId: q.format_id || null,
       size: computedSize || 'Size variable',
       direct_url: q.direct_url || null,
+      mimeType: q.ext === 'webm' ? 'video/webm' : 'video/mp4',
     };
 
-    // Keep the entry with known size or first occurrences
-    if (!uniqueQualityMap.has(resolution) || computedSize) {
-      uniqueQualityMap.set(resolution, option);
+    const codec = String(q.vcodec || '').toLowerCase();
+    const isMuxed = q.acodec && q.acodec !== 'none';
+    const compatibilityScore =
+      (isMuxed ? 100 : 0) +
+      (q.ext === 'mp4' ? 30 : 0) +
+      (codec.startsWith('avc') || codec.startsWith('h264') ? 20 : 0) +
+      (computedSize ? 1 : 0);
+    const existing = uniqueQualityMap.get(resolution);
+    if (!existing || compatibilityScore > existing.compatibilityScore) {
+      uniqueQualityMap.set(resolution, { ...option, compatibilityScore });
     }
   });
 
-  const formattedQualities = Array.from(uniqueQualityMap.values());
+  const formattedQualities = Array.from(uniqueQualityMap.values()).map(
+    ({ compatibilityScore, ...option }) => option
+  );
 
   return {
     title: data.title || 'Untitled Video',
@@ -146,7 +172,10 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
   const { addDownload } = useDownloadStore.getState();
 
   const title = payload.title || 'media_file';
-  const isAudio = payload.format === 'mp3-audio' || payload.audio_only === true;
+  const isAudio =
+    payload.format === 'mp3-audio' ||
+    payload.audio_only === true ||
+    payload.mime_type?.startsWith('audio/');
 
   // Add to queue in store - queue processor manages concurrent execution
   addDownload({
@@ -158,6 +187,9 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
     quality: payload.format || 'HD',
     formatId: payload.formatId || null,
     isAudio,
+    isDirectFile: Boolean(payload.is_direct_file),
+    mimeType: payload.mime_type || (isAudio ? 'audio/mpeg' : 'video/mp4'),
+    extension: payload.extension || (isAudio ? 'mp3' : 'mp4'),
   });
 };
 
@@ -166,19 +198,26 @@ export const executeDownloadTask = async (item, notify) => {
 
   const title = item.title || 'media_file';
   const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 45);
-  const extension = item.isAudio ? 'mp3' : 'mp4';
-  const fileName = `${cleanTitle}_${item.id}.${extension}`;
-
   try {
-    const downloadEndpoint = await prepareDownloadOnServer(item);
+    const prepared = item.isDirectFile
+      ? {
+          url: item.url,
+          extension: item.extension,
+          mimeType: item.mimeType,
+        }
+      : await prepareDownloadOnServer(item);
+    const extension = prepared.extension || item.extension || (item.isAudio ? 'mp3' : 'mp4');
+    const mimeType = prepared.mimeType || item.mimeType || 'application/octet-stream';
+    const fileName = `${cleanTitle}_${item.id}.${extension}`;
+    useDownloadStore.getState().updateDownloadSource(item.id, { extension, mimeType });
     const result = await downloadToDevice(
-      downloadEndpoint,
+      prepared.url,
       fileName,
       title,
       notify,
       item.id,
-      item.isAudio,
-      item.resumeData
+      mimeType,
+      useDownloadStore.getState().downloads.find((d) => d.id === item.id)?.resumeData
     );
 
     if (result?.isPaused) {
@@ -204,22 +243,32 @@ export const executeDownloadTask = async (item, notify) => {
 
 const prepareDownloadOnServer = async (item) => {
   const store = useDownloadStore.getState();
-  const response = await apiFetch('/api/v1/download/jobs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      url: item.url,
-      quality: item.quality || 'best',
-      format_id: item.formatId || null,
-      audio_only: Boolean(item.isAudio),
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(await parseApiError(response, 'Unable to start download job.'));
+  if (item.preparedUrl) {
+    return {
+      url: item.preparedUrl,
+      extension: item.extension,
+      mimeType: item.mimeType,
+    };
   }
+  let jobId = item.serverJobId;
+  if (!jobId) {
+    const response = await apiFetch('/api/v1/download/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: item.url,
+        quality: item.quality || 'best',
+        format_id: item.formatId || null,
+        audio_only: Boolean(item.isAudio),
+      }),
+    });
 
-  const { job_id: jobId } = await response.json();
+    if (!response.ok) {
+      throw new Error(await parseApiError(response, 'Unable to start download job.'));
+    }
+    ({ job_id: jobId } = await response.json());
+    store.updateDownloadSource(item.id, { serverJobId: jobId });
+  }
   if (!jobId) throw new Error('The backend did not return a download job ID.');
 
   while (true) {
@@ -232,6 +281,14 @@ const prepareDownloadOnServer = async (item) => {
 
     const statusResponse = await apiFetch(`/api/v1/download/jobs/${jobId}`);
     if (!statusResponse.ok) {
+      if (statusResponse.status === 404) {
+        store.updateDownloadSource(item.id, {
+          serverJobId: null,
+          preparedUrl: null,
+          resumeData: null,
+        });
+        return prepareDownloadOnServer({ ...item, serverJobId: null });
+      }
       throw new Error(
         await parseApiError(statusResponse, 'Unable to read download progress.')
       );
@@ -243,7 +300,17 @@ const prepareDownloadOnServer = async (item) => {
 
     if (job.status === 'ready') {
       store.updateProgress(item.id, 0.9, 'downloading');
-      return `${API_BASE_URL}/api/v1/download/jobs/${jobId}/file`;
+      const prepared = {
+        url: `${API_BASE_URL}/api/v1/download/jobs/${jobId}/file`,
+        extension: job.extension || (item.isAudio ? 'mp3' : 'mp4'),
+        mimeType: job.mime_type || (item.isAudio ? 'audio/mpeg' : 'video/mp4'),
+      };
+      store.updateDownloadSource(item.id, {
+        preparedUrl: prepared.url,
+        extension: prepared.extension,
+        mimeType: prepared.mimeType,
+      });
+      return prepared;
     }
     if (job.status === 'failed') {
       throw new Error(job.error || 'The backend could not prepare this media.');
@@ -259,7 +326,7 @@ const downloadToDevice = async (
   title,
   notify,
   downloadId,
-  isAudio,
+  mimeType,
   initialResumeData = null
 ) => {
   const fileUri = `${FileSystem.documentDirectory}${fileName}`;
@@ -353,8 +420,6 @@ const downloadToDevice = async (
   // 4. Save file to either configured custom SAF folder or default MediaLibrary album
   try {
     if (downloadUri && FileSystem.StorageAccessFramework) {
-      const mimeType = isAudio ? 'audio/mpeg' : 'video/mp4';
-
       const safariTargetUri = await FileSystem.StorageAccessFramework.createFileAsync(
         downloadUri,
         fileName,
@@ -368,17 +433,15 @@ const downloadToDevice = async (
       });
 
       finalUri = safariTargetUri;
-    } else {
-      const permission = await MediaLibrary.requestPermissionsAsync(true);
+    } else if (mimeType.startsWith('image/') || mimeType.startsWith('video/') || mimeType.startsWith('audio/')) {
+      const granularPermission = mimeType.startsWith('image/')
+        ? 'photo'
+        : mimeType.startsWith('audio/')
+          ? 'audio'
+          : 'video';
+      const permission = await MediaLibrary.requestPermissionsAsync(true, [granularPermission]);
       if (permission.granted) {
-        const asset = await MediaLibrary.createAssetAsync(result.uri);
-        const album = await MediaLibrary.getAlbumAsync('Downloads');
-
-        if (album === null) {
-          await MediaLibrary.createAlbumAsync('Downloads', asset, false);
-        } else {
-          await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
-        }
+        await MediaLibrary.createAssetAsync(result.uri);
       }
     }
 
@@ -404,71 +467,5 @@ export const startOrResumeDownload = async (item) => {
     return;
   }
 
-  const fileUri = `${FileSystem.documentDirectory}${Date.now()}_${item.id}.mp4`;
-
-  const callback = (downloadProgress) => {
-    const totalExpected = downloadProgress.totalBytesExpectedToWrite;
-    if (totalExpected > 0) {
-      const progress = downloadProgress.totalBytesWritten / totalExpected;
-      store.updateProgress(item.id, progress, 'downloading');
-    }
-  };
-
-  let downloadResumable;
-
-  try {
-    if (item.resumeData) {
-      // Resume existing download using saved state
-      downloadResumable = FileSystem.createDownloadResumable(
-        item.url,
-        fileUri,
-        {},
-        callback,
-        item.resumeData
-      );
-    } else {
-      // Create new download instance
-      downloadResumable = FileSystem.createDownloadResumable(
-        item.url,
-        fileUri,
-        {},
-        callback
-      );
-    }
-
-    // Register instance so store can access .pauseAsync()
-    store.registerResumable(item.id, downloadResumable);
-    store.updateProgress(item.id, item.progress || 0, 'downloading');
-
-    const result = await downloadResumable.downloadAsync();
-
-    // Check if task was paused during resume attempt
-    const currentItem = store.downloads.find((d) => d.id === item.id);
-    if (currentItem?.status === 'paused') {
-      return;
-    }
-
-    if (result && result.uri) {
-      store.completeDownload(item.id, result.uri, item.fileSize);
-    } else {
-      throw new Error('No URI returned');
-    }
-  } catch (error) {
-    const currentItem = store.downloads.find((d) => d.id === item.id);
-    if (currentItem?.status === 'paused') {
-      return;
-    }
-
-    console.error('Download error / failed to resume:', error);
-
-    // Alert user on failure after attempting resume
-    Alert.alert(
-      'Download Failed',
-      `Unable to resume downloading "${item.title}". Please check your connection and try again.`,
-      [{ text: 'OK' }]
-    );
-
-    // Update status to failed
-    store.failDownload(item.id, 'Download failed');
-  }
+  store.resumeDownload(item.id);
 };

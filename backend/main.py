@@ -6,10 +6,13 @@ import logging
 import ipaddress
 import socket
 import time
+import mimetypes
+import re
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
@@ -255,6 +258,31 @@ def _sync_extract_info(url: str):
 
     raise RuntimeError(f"All extraction strategies failed. Last error: {last_err}")
 
+def _sync_probe_direct_file(url: str) -> dict:
+    request = Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
+    with urlopen(request, timeout=30) as response:
+        final_url = validate_public_url(response.geturl())
+        content_type = response.headers.get_content_type() or 'application/octet-stream'
+        content_length = response.headers.get('Content-Length')
+        disposition = response.headers.get('Content-Disposition', '')
+        filename_match = re.search(r"filename\*?=(?:UTF-8''|)[\"']?([^\"';]+)", disposition, re.I)
+        filename = filename_match.group(1) if filename_match else os.path.basename(urlparse(final_url).path)
+        filename = filename or 'download'
+        extension = os.path.splitext(filename)[1].lstrip('.').lower()
+        if not extension:
+            extension = (mimetypes.guess_extension(content_type) or '').lstrip('.')
+        if content_type in {'text/html', 'application/xhtml+xml'} and not extension:
+            raise ValueError('The URL returned a web page, not a downloadable file.')
+        return {
+            'title': filename,
+            'original_platform_url': final_url,
+            'direct_url': final_url,
+            'is_direct_file': True,
+            'mime_type': content_type,
+            'extension': extension or 'bin',
+            'filesize': int(content_length) if content_length and content_length.isdigit() else None,
+        }
+
 def _sync_download_media(url: str, task_dir: str, custom_download_opts: dict) -> str:
     # Falls back from proxy to direct IP if proxy stream socket times out
     strategies = [("direct", False)]
@@ -384,6 +412,10 @@ async def run_download_job(job_id: str, request: DownloadJobRequest):
             'progress': 1,
             'filename': filename,
             'size': os.path.getsize(filename),
+            'extension': os.path.splitext(filename)[1].lstrip('.').lower(),
+            'mime_type': mimetypes.guess_type(filename)[0] or (
+                'audio/mpeg' if request.audio_only else 'video/mp4'
+            ),
         })
     except Exception as exc:
         job.update({'status': 'failed', 'stage': 'failed', 'error': str(exc)})
@@ -410,8 +442,12 @@ async def health_check():
 async def extract_info(url: str = Query(..., description="Media platform URL")):
     try:
         url = validate_public_url(url)
-        async with job_semaphore:
-            info = await asyncio.to_thread(_sync_extract_info, url)
+        try:
+            async with job_semaphore:
+                info = await asyncio.to_thread(_sync_extract_info, url)
+        except Exception as extractor_error:
+            logger.info("yt-dlp did not recognize URL; probing direct file: %s", extractor_error)
+            return JSONResponse(await asyncio.to_thread(_sync_probe_direct_file, url))
 
         formats = []
         if 'formats' in info and isinstance(info['formats'], list):
@@ -529,7 +565,7 @@ async def get_download_job(job_id: str):
     return {
         key: job.get(key) for key in (
             'id', 'status', 'stage', 'progress', 'downloaded_bytes',
-            'total_bytes', 'speed', 'eta', 'size', 'error'
+            'total_bytes', 'speed', 'eta', 'size', 'error', 'extension', 'mime_type'
         )
     }
 
@@ -541,13 +577,13 @@ async def get_download_job_file(job_id: str, background_tasks: BackgroundTasks):
     if job.get('status') != 'ready' or not job.get('filename'):
         raise HTTPException(status_code=409, detail="Download file is not ready.")
 
-    extension = 'mp3' if job.get('audio_only') else 'mp4'
-    background_tasks.add_task(remove_temp_directory, job['task_dir'])
-    background_tasks.add_task(download_jobs.pop, job_id, None)
+    extension = job.get('extension') or ('mp3' if job.get('audio_only') else 'mp4')
     return FileResponse(
         path=job['filename'],
         filename=f"download_{job_id[:8]}.{extension}",
-        media_type="audio/mpeg" if job.get('audio_only') else "video/mp4",
+        media_type=job.get('mime_type') or (
+            "audio/mpeg" if job.get('audio_only') else "video/mp4"
+        ),
     )
 
 # ----------------------------------------------------------------------

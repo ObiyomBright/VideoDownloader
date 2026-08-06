@@ -18,7 +18,13 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
   const [downloading, setDownloading] = useState(false);
 
   const formatOptions =
-    mediaData?.available_qualities && mediaData.available_qualities.length > 0
+    mediaData?.is_direct_file
+      ? [{
+          label: `${(mediaData.extension || 'FILE').toUpperCase()} file`,
+          value: 'direct-file',
+          rawQuality: 'Original',
+        }]
+      : mediaData?.available_qualities && mediaData.available_qualities.length > 0
       ? mediaData.available_qualities
       : [
           { label: 'MP4 - 1080p', value: '1080', size: null },
@@ -80,6 +86,10 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
         format: chosenOption?.rawQuality || selectedFormat || 'best',
         formatId: chosenOption?.formatId || null,
         audio_only: selectedFormat === 'mp3-audio',
+        is_direct_file: Boolean(mediaData.is_direct_file),
+        mime_type: mediaData.mime_type,
+        extension: mediaData.extension,
+        size: mediaData.filesize,
         available_qualities: mediaData.available_qualities,
       };
 

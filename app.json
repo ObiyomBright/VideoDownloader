@@ -56,7 +56,8 @@
           "photosPermission": "Allow VideoDownloader to access your photos.",
           "savePhotosPermission": "Allow VideoDownloader to save downloaded videos and media to your device.",
           "audioPermission": "Allow VideoDownloader to save downloaded audio files to your device.",
-          "isAccessMediaLocationEnabled": true
+          "isAccessMediaLocationEnabled": true,
+          "granularPermissions": ["photo", "video", "audio"]
         }
       ],
       "expo-sqlite"

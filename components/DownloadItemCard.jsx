@@ -48,13 +48,14 @@ const DownloadItemCard = ({ item, onDeleteRequest }) => {
   const isFailed = item.status === 'failed';
   const isCompleted = item.status === 'completed';
 
-  const imageSourceUri = item.thumbnail || item.localUri || item.url;
+  const isImage = item.mimeType?.startsWith('image/');
+  const imageSourceUri = isImage ? (item.thumbnail || item.localUri || item.url) : item.thumbnail;
   const rawProgress = typeof item.progress === 'number' ? item.progress : 0;
   const progressPercent = Math.min(Math.max(Math.round(rawProgress * 100), 0), 100);
   const formattedDuration = formatDuration(item.duration);
 
   const handleMissingFile = () => {
-    showNotification('Video file not found or corrupted', 'error');
+    showNotification('File not found or corrupted', 'error');
     Alert.alert(
       'File Not Found',
       'This file was deleted or moved from your device storage.',
@@ -68,7 +69,7 @@ const DownloadItemCard = ({ item, onDeleteRequest }) => {
       showNotification(
         isFailed
           ? 'Download failed. Please tap "Retry Download".'
-          : 'Please wait for the video to finish downloading before playing.',
+          : 'Please wait for the file to finish downloading before opening it.',
         'warning'
       );
       return;
@@ -89,15 +90,20 @@ const DownloadItemCard = ({ item, onDeleteRequest }) => {
 
     try {
       if (Platform.OS === 'android' && item.localUri) {
-        const contentUri = await FileSystem.getContentUriAsync(item.localUri);
+        const contentUri = item.localUri.startsWith('content://')
+          ? item.localUri
+          : await FileSystem.getContentUriAsync(item.localUri);
         await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
           data: contentUri,
-          type: 'video/*',
+          type: item.mimeType || 'application/octet-stream',
           flags: 1,
         });
       } else if (Platform.OS === 'ios' && item.localUri) {
         if (await Sharing.isAvailableAsync()) {
-          await Sharing.shareAsync(item.localUri);
+          await Sharing.shareAsync(item.localUri, {
+            mimeType: item.mimeType || 'application/octet-stream',
+            dialogTitle: `Open ${item.title}`,
+          });
         }
       } else if (mediaSource) {
         const canOpen = await Linking.canOpenURL(mediaSource);
@@ -108,7 +114,7 @@ const DownloadItemCard = ({ item, onDeleteRequest }) => {
         }
       }
     } catch (error) {
-      showNotification('Unable to play video', 'error');
+      showNotification('Unable to open this file with an installed app.', 'error');
     }
   };
 
@@ -122,14 +128,22 @@ const DownloadItemCard = ({ item, onDeleteRequest }) => {
     startOrResumeDownload(item);
   };
 
-  const handleShare = (e) => {
+  const handleShare = async (e) => {
     e?.stopPropagation?.();
     if (!isCompleted) return;
 
-    Share.share({
-      url: mediaSource,
-      message: `Check out this video: ${item.title}`,
-    }).catch((err) => console.error('Error sharing:', err));
+    try {
+      if (item.localUri && await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(item.localUri, {
+          mimeType: item.mimeType || 'application/octet-stream',
+          dialogTitle: `Share ${item.title}`,
+        });
+      } else {
+        await Share.share({ url: mediaSource, message: item.title });
+      }
+    } catch (err) {
+      console.error('Error sharing:', err);
+    }
   };
 
   const handleDelete = (e) => {
@@ -166,7 +180,11 @@ const DownloadItemCard = ({ item, onDeleteRequest }) => {
             />
           ) : (
             <View style={[styles.placeholderThumb, { backgroundColor: theme.border }]}>
-              <Ionicons name="videocam-outline" size={24} color={theme.subtext} />
+              <Ionicons
+                name={item.mimeType?.startsWith('audio/') ? 'musical-notes-outline' : item.mimeType === 'application/pdf' ? 'document-text-outline' : 'document-outline'}
+                size={24}
+                color={theme.subtext}
+              />
             </View>
           )}
 

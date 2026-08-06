@@ -14,6 +14,14 @@ export const useDownloadStore = create(
         activeDownloadTasks.set(id, resumableInstance);
       },
 
+      updateDownloadSource: (id, source = {}) => {
+        set((state) => ({
+          downloads: state.downloads.map((item) =>
+            item.id === id ? { ...item, ...source } : item
+          ),
+        }));
+      },
+
       // Queue management engine (Snaptube standard max 3 concurrent)
       processQueue: async () => {
         const { downloads } = get();
@@ -57,12 +65,17 @@ export const useDownloadStore = create(
           quality: task.quality || 'HD',
           formatId: task.formatId || null,
           isAudio: task.isAudio || false,
+          isDirectFile: task.isDirectFile || false,
+          mimeType: task.mimeType || (task.isAudio ? 'audio/mpeg' : 'video/mp4'),
+          extension: task.extension || (task.isAudio ? 'mp3' : 'mp4'),
           progress: 0,
           status: 'queued', // 'queued' | 'downloading' | 'paused' | 'completed' | 'failed'
           createdAt: new Date().toISOString(),
           localUri: null,
           resumeData: null,
           error: null,
+          serverJobId: null,
+          preparedUrl: task.isDirectFile ? task.url : null,
         };
 
         set((state) => ({ downloads: [newTask, ...state.downloads] }));
@@ -163,6 +176,8 @@ export const useDownloadStore = create(
                   localUri,
                   fileSize: fileSize || item.fileSize,
                   resumeData: null,
+                  serverJobId: null,
+                  preparedUrl: null,
                   error: null,
                 }
               : item
