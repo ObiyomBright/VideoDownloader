@@ -1,17 +1,18 @@
 import os
-import sys
 import uuid
 import shutil
 import asyncio
 import logging
+import ipaddress
+import socket
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import List, Optional, Dict, Any
+from typing import Optional, Dict, Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from apscheduler.schedulers.background import BackgroundScheduler
 import yt_dlp
 import imageio_ffmpeg
 
@@ -44,53 +45,34 @@ os.makedirs(TEMP_DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(COOKIES_DIR, exist_ok=True)
 os.makedirs(WRITABLE_COOKIES_DIR, exist_ok=True)
 
-DEFAULT_SCRAPER_API_KEY = "ee6481adddd9f7163ef8224badf1a3d2"
-RAW_PROXY_URL = os.getenv("PROXY_URL") or f"http://scraperapi:{DEFAULT_SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
+RAW_PROXY_URL = os.getenv("PROXY_URL")
+MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "2")))
+job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
-# PO Token / Visitor Data configuration from environment
-ENV_PO_TOKEN = os.getenv("YOUTUBE_PO_TOKEN")
+# PO token values must include their yt-dlp client and context, for example
+# "mweb.gvs+TOKEN". Multiple values can be comma-separated.
+ENV_PO_TOKEN_SPEC = os.getenv("YOUTUBE_PO_TOKEN_SPEC") or os.getenv("YOUTUBE_PO_TOKEN")
 ENV_VISITOR_DATA = os.getenv("YOUTUBE_VISITOR_DATA")
 
 # ----------------------------------------------------------------------
-# 2. ENGINE MAINTENANCE & SCHEDULER
+# 2. APPLICATION LIFECYCLE
 # ----------------------------------------------------------------------
-def update_ytdlp_engine():
-    """Clears yt-dlp cache directory to prevent stale player JS tokens."""
-    logger.info("🔄 Triggering on-demand engine cache cleanup...")
-    try:
-        import subprocess
-        cache_cmd = [sys.executable, "-m", "yt_dlp", "--rm-cache-dir"]
-        subprocess.run(cache_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        logger.info("🧹 Engine cache cleared successfully.")
-    except Exception as e:
-        logger.error(f"❌ Failed to clear cache: {str(e)}")
-
-scheduler = BackgroundScheduler()
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    scheduler.add_job(update_ytdlp_engine, 'interval', hours=24)
-    scheduler.start()
-    logger.info("🚀 App startup complete. Background scheduler active with PO-Token support.")
+    logger.info("App startup complete; accepting %s concurrent jobs.", MAX_CONCURRENT_JOBS)
     yield
-    # Graceful shutdown: cancel pending tasks to prevent unhandled stdout prints
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    scheduler.shutdown()
-    logger.info("🛑 App shutdown complete.")
+    logger.info("App shutdown complete.")
 
 app = FastAPI(
-    title="Snaptube-Grade Engine API", 
+    title="Video Downloader API",
     version="5.1.0", 
     lifespan=lifespan
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",")],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -98,6 +80,28 @@ app.add_middleware(
 # ----------------------------------------------------------------------
 # 3. HELPER FUNCTIONS & COOKIE HANDLERS
 # ----------------------------------------------------------------------
+def validate_public_url(raw_url: str) -> str:
+    if not raw_url or len(raw_url) > 2048:
+        raise ValueError("A valid media URL is required.")
+
+    parsed = urlparse(raw_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Only public http and https URLs are supported.")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing credentials are not supported.")
+
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("The media host could not be resolved.") from exc
+
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if not ip.is_global:
+            raise ValueError("Private and local network URLs are not supported.")
+
+    return raw_url.strip()
+
 def sanitize_and_write_cookies(src_path: str, dst_path: str) -> bool:
     try:
         with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -149,34 +153,17 @@ def get_cookie_file_for_url(url: str) -> Optional[str]:
 
     return None
 
-def build_bulletproof_options(
-    url: str, 
-    client_tier: str = "android", 
+def build_ytdlp_options(
+    url: str,
     use_proxy: bool = True,
     custom_opts: Optional[dict] = None
 ) -> dict:
     is_youtube = "youtube.com" in url or "youtu.be" in url
 
-    # Mobile & native clients bypass heavy JS bot challenges
-    if client_tier == "android":
-        clients = ['android', 'ios', 'mweb']
-        user_agent = 'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36'
-    elif client_tier == "ios":
-        clients = ['ios', 'android', 'mweb']
-        user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
-    elif client_tier == "mweb":
-        clients = ['mweb', 'web']
-        user_agent = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
-    else:
-        clients = ['android', 'ios', 'mweb']
-        user_agent = 'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36'
-
     opts: Dict[str, Any] = {
         'quiet': True,
         'no_warnings': True,
-        'nocheckcertificate': True,
-        'geo_bypass': True,
-        'concurrent_fragment_downloads': 5,
+        'concurrent_fragment_downloads': 3,
         'prefer_ffmpeg': True,
         'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(),
         'hls_use_mpegts': True,
@@ -185,12 +172,7 @@ def build_bulletproof_options(
         'fragment_retries': 10,
         'max_filesize': 500 * 1024 * 1024,   # 500MB safety cap for RAM protection
         'http_chunk_size': 10 * 1024 * 1024, # 10MB chunking keeps TCP sockets active
-        'http_headers': {
-            'User-Agent': user_agent,
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Sec-Fetch-Mode': 'navigate',
-        },
+        'noplaylist': True,
     }
 
     cookie_file = get_cookie_file_for_url(url)
@@ -198,23 +180,35 @@ def build_bulletproof_options(
         opts['cookiefile'] = cookie_file
         logger.info(f"🍪 Using cookie file: {cookie_file}")
 
-    if use_proxy:
+    if use_proxy and RAW_PROXY_URL:
         opts['proxy'] = RAW_PROXY_URL
 
     if is_youtube:
-        youtube_args = {
-            'player_client': clients,
-            'player_skip': ['js', 'configs'],
-        }
+        youtube_args = {}
 
-        if ENV_PO_TOKEN and ENV_VISITOR_DATA:
-            youtube_args['po_token'] = f"mweb+{ENV_PO_TOKEN}"
-            youtube_args['visitor_data'] = ENV_VISITOR_DATA
-            logger.info("🔑 Injected PO Token and Visitor Data from environment.")
+        if ENV_PO_TOKEN_SPEC:
+            token_specs = [
+                value.strip()
+                for value in ENV_PO_TOKEN_SPEC.split(',')
+                if value.strip()
+            ]
+            valid_specs = [
+                value for value in token_specs
+                if '+' in value and '.' in value.partition('+')[0]
+            ]
+            if len(valid_specs) == len(token_specs):
+                youtube_args['po_token'] = valid_specs
+                logger.info("Using %s explicitly qualified YouTube PO token(s).", len(valid_specs))
+            else:
+                logger.warning(
+                    "Ignoring YOUTUBE_PO_TOKEN_SPEC: each value must use CLIENT.CONTEXT+TOKEN syntax."
+                )
 
-        opts['extractor_args'] = {
-            'youtube': youtube_args
-        }
+        if ENV_VISITOR_DATA:
+            youtube_args['visitor_data'] = [ENV_VISITOR_DATA]
+
+        if youtube_args:
+            opts['extractor_args'] = {'youtube': youtube_args}
 
     if custom_opts:
         opts.update(custom_opts)
@@ -230,55 +224,48 @@ def remove_temp_directory(dirpath: str):
         logger.error(f"Failed to cleanup directory {dirpath}: {e}")
 
 # ----------------------------------------------------------------------
-# 4. WORKER EXECUTORS WITH MULTI-TIER FALLBACKS
+# 4. WORKER EXECUTORS WITH NETWORK FALLBACKS
 # ----------------------------------------------------------------------
 def _sync_extract_info(url: str):
-    strategies = [
-        ("android", True),
-        ("ios", True),
-        ("mweb", True),
-    ]
+    strategies = [("direct", False)]
+    if RAW_PROXY_URL:
+        strategies.insert(0, ("proxy", True))
     
     last_err = None
 
-    for tier, use_proxy in strategies:
+    for strategy, use_proxy in strategies:
         try:
-            logger.info(f"🔄 Extraction strategy: tier=[{tier}], proxy=[{use_proxy}]")
-            opts = build_bulletproof_options(
-                url, 
-                client_tier=tier, 
-                use_proxy=use_proxy, 
+            logger.info("Extraction strategy: %s", strategy)
+            opts = build_ytdlp_options(
+                url,
+                use_proxy=use_proxy,
                 custom_opts={'skip_download': True}
             )
             with yt_dlp.YoutubeDL(opts) as ytdl:
                 info = ytdl.extract_info(url, download=False)
                 if info and ('formats' in info or 'url' in info):
-                    logger.info(f"✅ Extraction succeeded with tier [{tier}].")
+                    logger.info("Extraction succeeded using %s.", strategy)
                     return info
         except Exception as err:
-            logger.warning(f"⚠️ Strategy tier [{tier}] extraction failed: {err}")
+            logger.warning("Extraction strategy %s failed: %s", strategy, err)
             last_err = err
 
     raise RuntimeError(f"All extraction strategies failed. Last error: {last_err}")
 
 def _sync_download_media(url: str, task_dir: str, custom_download_opts: dict) -> str:
     # Falls back from proxy to direct IP if proxy stream socket times out
-    strategies = [
-        ("android", True),
-        ("ios", True),
-        ("android", False),
-        ("ios", False),
-    ]
+    strategies = [("direct", False)]
+    if RAW_PROXY_URL:
+        strategies.insert(0, ("proxy", True))
     
     last_err = None
 
-    for tier, use_proxy in strategies:
+    for strategy, use_proxy in strategies:
         try:
-            logger.info(f"🔄 Download strategy: tier=[{tier}], proxy=[{use_proxy}]")
-            opts = build_bulletproof_options(
-                url, 
-                client_tier=tier, 
-                use_proxy=use_proxy, 
+            logger.info("Download strategy: %s", strategy)
+            opts = build_ytdlp_options(
+                url,
+                use_proxy=use_proxy,
                 custom_opts=custom_download_opts
             )
             with yt_dlp.YoutubeDL(opts) as ytdl:
@@ -293,7 +280,7 @@ def _sync_download_media(url: str, task_dir: str, custom_download_opts: dict) ->
                 return max(downloaded_files, key=os.path.getsize)
                 
         except Exception as err:
-            logger.warning(f"⚠️ Strategy tier [{tier}] (proxy={use_proxy}) download failed: {err}")
+            logger.warning("Download strategy %s failed: %s", strategy, err)
             last_err = err
 
     raise RuntimeError(f"All download strategies failed. Last error: {last_err}")
@@ -306,7 +293,7 @@ def _sync_download_media(url: str, task_dir: str, custom_download_opts: dict) ->
 async def root():
     return {
         "status": "online", 
-        "message": "Snaptube-Grade Video Downloader Engine API is running.",
+        "message": "Video Downloader API is running.",
         "environment": "Render" if IS_RENDER else "Local"
     }
 
@@ -315,15 +302,12 @@ async def root():
 async def health_check():
     return {"status": "ok", "engine": "active"}
 
-@app.get("/api/v1/update-engine")
-async def trigger_cron_update():
-    await asyncio.to_thread(update_ytdlp_engine)
-    return {"status": "success", "message": "Engine update triggered successfully."}
-
 @app.get("/api/v1/extract/url")
 async def extract_info(url: str = Query(..., description="Media platform URL")):
     try:
-        info = await asyncio.to_thread(_sync_extract_info, url)
+        url = validate_public_url(url)
+        async with job_semaphore:
+            info = await asyncio.to_thread(_sync_extract_info, url)
 
         formats = []
         if 'formats' in info and isinstance(info['formats'], list):
@@ -345,7 +329,8 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
                         'vcodec': vcodec,
                         'acodec': acodec,
                         'filesize_str': f"{round(filesize / (1024*1024), 2)} MB" if filesize else None,
-                        'direct_url': f.get('url'),
+                        'height': height,
+                        'fps': f.get('fps'),
                     })
 
         return JSONResponse({
@@ -355,8 +340,7 @@ async def extract_info(url: str = Query(..., description="Media platform URL")):
             "uploader": info.get('uploader') or info.get('extractor_key'),
             "platform": info.get('extractor_key'),
             "original_platform_url": url,
-            "available_qualities": formats[-15:] if formats else [],
-            "direct_url": info.get('url'),
+            "available_qualities": formats if formats else [],
         })
 
     except Exception as e:
@@ -369,8 +353,14 @@ async def download_media(
     background_tasks: BackgroundTasks,
     url: str = Query(...),
     quality: str = Query("best"),
+    format_id: Optional[str] = Query(None),
     audio_only: bool = Query(False)
 ):
+    try:
+        url = validate_public_url(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     task_id = str(uuid.uuid4())
     task_dir = os.path.join(TEMP_DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
@@ -380,6 +370,9 @@ async def download_media(
     if audio_only:
         format_selector = 'bestaudio/best'
         post_processors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
+    elif format_id and format_id.replace("-", "").replace("_", "").isalnum():
+        format_selector = f'{format_id}+bestaudio/{format_id}/best'
+        post_processors = []
     else:
         target_height = quality.replace("p", "") if "p" in quality and quality.replace("p", "").isdigit() else None
         if target_height:
@@ -402,12 +395,14 @@ async def download_media(
 
     try:
         try:
-            final_filename = await asyncio.to_thread(_sync_download_media, url, task_dir, download_custom_opts)
+            async with job_semaphore:
+                final_filename = await asyncio.to_thread(_sync_download_media, url, task_dir, download_custom_opts)
         except Exception as primary_err:
             logger.warning("⚠️ Requested high quality format unavailable. Attempting fallback single-stream download...")
             fallback_opts = dict(download_custom_opts)
             fallback_opts['format'] = 'b/best'
-            final_filename = await asyncio.to_thread(_sync_download_media, url, task_dir, fallback_opts)
+            async with job_semaphore:
+                final_filename = await asyncio.to_thread(_sync_download_media, url, task_dir, fallback_opts)
 
         background_tasks.add_task(remove_temp_directory, task_dir)
 

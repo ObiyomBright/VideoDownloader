@@ -119,6 +119,7 @@ const Home = () => {
             showNotification('Media info extracted successfully!', 'success');
         } catch (error) {
             console.error('Extraction Error:', error);
+            showNotification(error.message || 'Unable to extract media information.', 'error');
         } finally {
             setLoading(false);
         }

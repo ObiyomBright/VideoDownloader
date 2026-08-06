@@ -78,6 +78,7 @@ const MediaDownloader = ({ loading, mediaData, targetUrl, notify }) => {
           mediaData.direct_url ||
           mediaData.download_url,
         format: chosenOption?.rawQuality || selectedFormat || 'best',
+        formatId: chosenOption?.formatId || null,
         audio_only: selectedFormat === 'mp3-audio',
         available_qualities: mediaData.available_qualities,
       };

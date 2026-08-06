@@ -55,6 +55,7 @@ export const useDownloadStore = create(
           thumbnail: task.thumbnail || null,
           duration: task.duration || null,
           quality: task.quality || 'HD',
+          formatId: task.formatId || null,
           isAudio: task.isAudio || false,
           progress: 0,
           status: 'queued', // 'queued' | 'downloading' | 'paused' | 'completed' | 'failed'

@@ -3,9 +3,11 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 import { useDownloadStore } from '../stores/useDownloadStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { BASE_URL as API_BASE_URL } from './api';
 
-const API_BASE_URL = 'https://videodownloader-api-ze27.onrender.com';
-// const API_BASE_URL = 'http://10.0.2.2:8000';
+if (!API_BASE_URL) {
+  throw new Error('Missing Expo extra.apiBaseUrl configuration.');
+}
 
 const extractCleanUrl = (text) => {
   if (!text || typeof text !== 'string') return '';
@@ -87,6 +89,7 @@ export const fetchMediaInfo = async (inputUrl) => {
         : `${ext} - ${resolution}`,
       value: q.format_id ? `${resolution}_${q.format_id}` : resolution,
       rawQuality: resolution,
+      formatId: q.format_id || null,
       size: computedSize || 'Size variable',
       direct_url: q.direct_url || null,
     };
@@ -134,6 +137,7 @@ export const downloadMediaPayload = async (payload, notify, fallbackUrl = '') =>
     thumbnail: payload.thumbnail || null,
     duration: payload.duration || null,
     quality: payload.format || 'HD',
+    formatId: payload.formatId || null,
     isAudio,
   });
 };
@@ -147,9 +151,12 @@ export const executeDownloadTask = async (item, notify) => {
   const fileName = `${cleanTitle}_${item.id}.${extension}`;
 
   const selectedQuality = item.quality || 'best';
+  const formatIdQuery = item.formatId
+    ? `&format_id=${encodeURIComponent(item.formatId)}`
+    : '';
   const downloadEndpoint = `${API_BASE_URL}/api/v1/download?url=${encodeURIComponent(
     item.url
-  )}&quality=${encodeURIComponent(selectedQuality)}&audio_only=${item.isAudio || false}`;
+  )}&quality=${encodeURIComponent(selectedQuality)}&audio_only=${item.isAudio || false}${formatIdQuery}`;
 
   try {
     const result = await downloadToDevice(

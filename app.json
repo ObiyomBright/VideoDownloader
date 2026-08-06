@@ -1,9 +1,12 @@
 {
   "expo": {
-    "scheme": "VideoDownloader",
+    "scheme": "videodownloader",
     "name": "VideoDownloader",
     "slug": "VideoDownloader",
     "version": "1.0.0",
+    "extra": {
+      "apiBaseUrl": "https://videodownloader-api-ze27.onrender.com"
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -22,7 +25,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/logo.png",
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0F172A"
       },
       "edgeToEdgeEnabled": true,
